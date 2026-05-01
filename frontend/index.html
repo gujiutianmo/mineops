@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MineOps · 矿山管理系统</title>
+
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+    <!-- Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <!-- Charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- XLSX -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ========== 登录覆盖层 ========== -->
+<div id="login-overlay" class="login-overlay">
+    <div class="login-card">
+        <div style="text-align:center;margin-bottom:28px">
+            <div style="display:inline-flex;align-items:center;gap:12px;margin-bottom:12px">
+                <div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,var(--acc),#d97706);display:flex;align-items:center;justify-content:center">
+                    <i class="fas fa-mountain" style="color:var(--bg);font-size:22px"></i>
+                </div>
+                <h1 style="font-family:var(--font-display);font-size:28px;font-weight:900;letter-spacing:-0.5px">MineOps</h1>
+            </div>
+            <p style="font-size:13px;color:var(--txt2)">矿山综合管理系统 · 刚果矿区</p>
+        </div>
+        <div class="form-group">
+            <label for="login-username">用户名</label>
+            <input type="text" id="login-username" class="form-control" placeholder="请输入用户名" autocomplete="username">
+        </div>
+        <div class="form-group">
+            <label for="login-password">密码</label>
+            <input type="password" id="login-password" class="form-control" placeholder="请输入密码" autocomplete="current-password">
+        </div>
+        <button id="login-submit" class="btn btn-primary btn-block" onclick="Auth.login()">登 录</button>
+        <div id="login-error" class="login-error hidden"></div>
+        <div class="login-hint" style="margin-top:16px">
+            <p style="color:var(--txt2);margin-bottom:4px;font-weight:500">测试账户：</p>
+            <p>超级管理员：admin / admin</p>
+            <p>矿山A管理员：mine_a / mine123</p>
+            <p>矿山B管理员：mine_b / mine123</p>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 主应用外壳 ========== -->
+<div id="app-shell" class="app-shell hidden">
+
+    <!-- 移动端侧边栏切换按钮 -->
+    <button id="sidebar-toggle" class="sidebar-toggle" onclick="UI.toggleSidebar()">
+        <i class="fas fa-bars"></i>
+    </button>
+
+    <!-- 移动端侧边栏遮罩 -->
+    <div id="sidebar-overlay" class="sidebar-overlay" onclick="UI.closeSidebar()"></div>
+
+    <!-- 侧边栏 -->
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-logo">
+            <div class="logo-icon">
+                <i class="fas fa-mountain"></i>
+            </div>
+            <span class="logo-text">MineOps</span>
+        </div>
+        <nav class="sidebar-nav" id="sidebar-nav">
+            <!-- 由 JS 动态构建 -->
+        </nav>
+        <div class="sidebar-footer">
+            <div class="user-row">
+                <i class="fas fa-user-circle"></i>
+                <span id="sidebar-username">--</span>
+            </div>
+            <div>
+                <i class="fas fa-map-marker-alt" style="margin-right:4px"></i>
+                <span id="sidebar-mine">--</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 主内容区域 -->
+    <div class="main-area">
+        <!-- 顶部栏 -->
+        <header class="top-header">
+            <div class="top-header-left">
+                <h2 id="page-title" class="page-title">仪表板</h2>
+                <span id="mine-badge" class="mine-badge hidden"></span>
+            </div>
+            <div class="top-header-right">
+                <div class="lang-switcher" id="lang-switcher">
+                    <button class="lang-btn" data-lang="zh-CN" onclick="I18n.switchLang('zh-CN')">中文</button>
+                    <button class="lang-btn" data-lang="en-US" onclick="I18n.switchLang('en-US')">EN</button>
+                    <button class="lang-btn" data-lang="fr-FR" onclick="I18n.switchLang('fr-FR')">FR</button>
+                </div>
+                <div class="user-status">
+                    <div class="pulse-dot"></div>
+                    <span id="header-username" class="header-user">--</span>
+                </div>
+                <button class="btn-icon" onclick="Auth.logout()" title="退出登录">
+                    <i class="fas fa-right-from-bracket"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- 内容区（按页面动态渲染） -->
+        <main id="content-area" class="content-area">
+            <!-- 动态填充 -->
+        </main>
+    </div>
+</div>
+
+<!-- ========== 模态框容器 ========== -->
+<div id="modal-container"></div>
+
+<!-- ========== Toast 容器 ========== -->
+<div id="toast-container"></div>
+
+<!-- ========== JS 文件 ========== -->
+<script src="js/auth.js"></script>
+<script src="js/api.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
