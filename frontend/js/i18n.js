@@ -29,7 +29,7 @@ const I18n = {
                 "employeeCount": "员工数量", "financeTotal": "财务总额",
                 "noRecentActivity": "暂无最近活动", "monthlyHours": "月度工时",
                 "monthlyFuel": "月度油耗 (L)", "fuelTrend30d": "近30天油耗趋势",
-                "expenseByCategory": "支出分类", "todayLogs": "今日快捷录入",
+                "expenseByCategory": "支出模块", "todayLogs": "今日快捷录入",
                 "financeOverview": "财务概览"
             },
             "mines": { "title": "矿山管理", "name": "名称", "createdAt": "创建时间", "actions": "操作", "addMine": "添加矿山", "editMine": "编辑矿山" },
@@ -53,7 +53,7 @@ const I18n = {
             },
             "finance": {
                 "type": "类型", "amount": "金额", "currency": "货币",
-                "category": "类别", "description": "描述", "date": "日期",
+                "category": "支出明细", "description": "描述", "date": "日期",
                 "actions": "操作", "income": "收入", "expense": "支出",
                 "addFinance": "添加财务", "editFinance": "编辑财务", "title": "财务管理"
             },
@@ -131,7 +131,7 @@ const I18n = {
                 "employeeCount": "Employee Count", "financeTotal": "Finance Total",
                 "noRecentActivity": "No recent activity", "monthlyHours": "Monthly Hours",
                 "monthlyFuel": "Monthly Fuel (L)", "fuelTrend30d": "Fuel Trend (30 Days)",
-                "expenseByCategory": "Expense by Category", "todayLogs": "Smart Entry · Today",
+                "expenseByCategory": "Expense by Module", "todayLogs": "Smart Entry · Today",
                 "financeOverview": "Finance Overview"
             },
             "mines": { "title": "Mine Management", "name": "Name", "createdAt": "Created At", "actions": "Actions", "addMine": "Add Mine", "editMine": "Edit Mine" },
@@ -155,7 +155,7 @@ const I18n = {
             },
             "finance": {
                 "type": "Type", "amount": "Amount", "currency": "Currency",
-                "category": "Category", "description": "Description", "date": "Date",
+                "category": "Expense Detail", "description": "Description", "date": "Date",
                 "actions": "Actions", "income": "Income", "expense": "Expense",
                 "addFinance": "Add Finance", "editFinance": "Edit Finance", "title": "Finance Management"
             },
@@ -238,7 +238,7 @@ const I18n = {
                 "employeeCount": "Nombre d'Employés", "financeTotal": "Total Financier",
                 "noRecentActivity": "Aucune activité récente", "monthlyHours": "Heures Mensuelles",
                 "monthlyFuel": "Carburant Mensuel (L)", "fuelTrend30d": "Tendance Carburant (30j)",
-                "expenseByCategory": "Dépenses par Catégorie", "todayLogs": "Saisie Rapide · Jour",
+                "expenseByCategory": "Dépenses par module", "todayLogs": "Saisie Rapide · Jour",
                 "financeOverview": "Aperçu Financier"
             },
             "mines": { "title": "Gestion des Mines", "name": "Nom", "createdAt": "Créé le", "actions": "Actions", "addMine": "Ajouter une Mine", "editMine": "Modifier la Mine" },
@@ -262,7 +262,7 @@ const I18n = {
             },
             "finance": {
                 "type": "Type", "amount": "Montant", "currency": "Devise",
-                "category": "Catégorie", "description": "Description", "date": "Date",
+                "category": "Détail dépense", "description": "Description", "date": "Date",
                 "actions": "Actions", "income": "Revenu", "expense": "Dépense",
                 "addFinance": "Ajouter Transaction", "editFinance": "Modifier Transaction", "title": "Gestion Financière"
             },
@@ -499,7 +499,7 @@ const I18n = {
             'mines-table': ['mines.name', 'mines.createdAt', 'mines.actions'],
             'equipment-table': ['equipment.code', 'equipment.name', 'equipment.brand', 'equipment.type', 'equipment.mine', 'equipment.actions'],
             'employees-table': ['employees.nameFr', 'employees.nameCn', 'employees.job', 'employees.salary', 'employees.currency', 'employees.actions'],
-            'finance-table': ['finance.type', 'finance.amount', 'finance.currency', 'finance.category', 'finance.description', 'finance.date', 'finance.actions'],
+            'finance-table': ['finance.type', 'finance.amount', 'finance.currency', 'finance.category', 'finance.date', 'finance.actions'],
             'shipping-table': ['shipping.plateNumber', 'shipping.loadTime', 'shipping.factory', 'shipping.cargoType', 'shipping.actions'],
             'worklogs-table': ['worklogs.equipment', 'worklogs.workDate', 'worklogs.workHours', 'worklogs.fuelLiters', 'worklogs.remark', 'worklogs.actions'],
             'plates-table': ['plates.plateNumber', 'plates.mine', 'plates.createdAt', 'plates.actions'],
@@ -515,6 +515,130 @@ const I18n = {
             });
         }
     }
+};
+
+I18n._phraseMaps = {
+    'en-US': {
+        '仪表板': 'Dashboard', '智能运营': 'Smart Ops', '智能运营中心': 'Smart Operations',
+        '矿山管理': 'Mine Management', '用户管理': 'User Management', '设备管理': 'Equipment Management',
+        '设备工时': 'Equipment Hours', '员工管理': 'Employee Management', '财务管理': 'Finance Management',
+        '运输管理': 'Shipping Management', '车队管理': 'Fleet Management', '软件下载': 'App Downloads',
+        '版本下载': 'Version Download', '工作日志': 'Work Logs', '矿山综合管理系统 · 刚果矿区': 'Mine management system · Congo site',
+        '用户名': 'Username', '密码': 'Password', '请输入用户名': 'Enter username', '请输入密码': 'Enter password',
+        '登 录': 'Login', '登录': 'Login', '退出登录': 'Log out', '测试账户：': 'Test accounts:',
+        '超级管理员：admin / admin': 'Super admin: admin / admin', '矿山A管理员：mine_a / mine123': 'Mine A admin: mine_a / mine123',
+        '矿山B管理员：mine_b / mine123': 'Mine B admin: mine_b / mine123',
+        '新增': 'Add', '编辑': 'Edit', '删除': 'Delete', '保存': 'Save', '取消': 'Cancel', '确认': 'Confirm',
+        '操作': 'Actions', '查询': 'Search', '刷新': 'Refresh', '导入': 'Import', '导出': 'Export', '模板': 'Template',
+        '下载': 'Download', '加载中...': 'Loading...', '暂无数据': 'No data', '暂无记录': 'No records',
+        '收入': 'Income', '支出': 'Expense', '净额': 'Net', '金额': 'Amount', '货币': 'Currency', '日期': 'Date',
+        '描述': 'Description', '说明': 'Description', '支出明细': 'Expense Details', '收支分析': 'Income & Expense Analysis',
+        '财务概览': 'Finance Overview', '收入记录': 'Income Records', '支出记录': 'Expense Records',
+        'Excel导入': 'Excel Import', '下载模板': 'Download Template', '选择Excel导入': 'Choose Excel to Import',
+        '设备': 'Equipment', '名称': 'Name', '代码': 'Code', '品牌': 'Brand', '类型': 'Type', '类别': 'Category',
+        '状态': 'Status', '所属矿山': 'Mine', '运行中': 'Running', '闲置': 'Idle', '维修中': 'Maintenance',
+        '选择设备': 'Select Equipment', '选择设备（可多选）': 'Select Equipment (multiple)',
+        '工时记录': 'Hour Records', '补录工时与油耗': 'Manual Hours & Fuel', '加油登记': 'Fuel Entry',
+        '最近工时记录': 'Recent Hour Records', '进行中的工时': 'Active Hours', '最近加油记录': 'Recent Fuel Records',
+        '员工': 'Employees', '员工签到': 'Employee Check-in', '签到': 'Check in', '签退': 'Check out',
+        '今日出勤': 'Today Attendance', '正在上班': 'On Duty', '今日工时': 'Today Hours', '本月工时': 'Monthly Hours',
+        '运输记录': 'Shipping Records', '车牌号': 'Plate No.', '工厂': 'Factory', '货物类型': 'Cargo Type',
+        '车牌比对': 'Plate Comparison', '授权车牌': 'Authorized Plates', '工厂管理': 'Factory Management',
+        '车队车辆': 'Fleet Vehicles', '应用版本': 'App Version', '接口地址': 'API URL', '构建时间': 'Build Time'
+    },
+    'fr-FR': {
+        '仪表板': 'Tableau de bord', '智能运营': 'Opérations intelligentes', '智能运营中心': 'Centre des opérations',
+        '矿山管理': 'Gestion des mines', '用户管理': 'Gestion des utilisateurs', '设备管理': 'Gestion des équipements',
+        '设备工时': 'Heures des équipements', '员工管理': 'Gestion des employés', '财务管理': 'Gestion financière',
+        '运输管理': 'Gestion du transport', '车队管理': 'Gestion de flotte', '软件下载': 'Téléchargements',
+        '版本下载': 'Téléchargement de version', '工作日志': 'Journaux de travail', '矿山综合管理系统 · 刚果矿区': 'Système de gestion minière · Site Congo',
+        '用户名': 'Nom d’utilisateur', '密码': 'Mot de passe', '请输入用户名': 'Entrez le nom d’utilisateur', '请输入密码': 'Entrez le mot de passe',
+        '登 录': 'Connexion', '登录': 'Connexion', '退出登录': 'Déconnexion', '测试账户：': 'Comptes de test :',
+        '超级管理员：admin / admin': 'Super administrateur : admin / admin', '矿山A管理员：mine_a / mine123': 'Admin mine A : mine_a / mine123',
+        '矿山B管理员：mine_b / mine123': 'Admin mine B : mine_b / mine123',
+        '新增': 'Ajouter', '编辑': 'Modifier', '删除': 'Supprimer', '保存': 'Enregistrer', '取消': 'Annuler', '确认': 'Confirmer',
+        '操作': 'Actions', '查询': 'Rechercher', '刷新': 'Actualiser', '导入': 'Importer', '导出': 'Exporter', '模板': 'Modèle',
+        '下载': 'Télécharger', '加载中...': 'Chargement...', '暂无数据': 'Aucune donnée', '暂无记录': 'Aucun enregistrement',
+        '收入': 'Revenus', '支出': 'Dépenses', '净额': 'Solde', '金额': 'Montant', '货币': 'Devise', '日期': 'Date',
+        '描述': 'Description', '说明': 'Description', '支出明细': 'Détails des dépenses', '收支分析': 'Analyse revenus/dépenses',
+        '财务概览': 'Aperçu financier', '收入记录': 'Revenus', '支出记录': 'Dépenses',
+        'Excel导入': 'Import Excel', '下载模板': 'Télécharger le modèle', '选择Excel导入': 'Choisir un Excel',
+        '设备': 'Équipement', '名称': 'Nom', '代码': 'Code', '品牌': 'Marque', '类型': 'Type', '类别': 'Catégorie',
+        '状态': 'Statut', '所属矿山': 'Mine', '运行中': 'En marche', '闲置': 'Inactif', '维修中': 'Maintenance',
+        '选择设备': 'Choisir équipement', '选择设备（可多选）': 'Choisir équipements (multiple)',
+        '工时记录': 'Heures de travail', '补录工时与油耗': 'Saisie heures/carburant', '加油登记': 'Saisie carburant',
+        '最近工时记录': 'Heures récentes', '进行中的工时': 'Heures en cours', '最近加油记录': 'Carburant récent',
+        '员工': 'Employés', '员工签到': 'Pointage employé', '签到': 'Entrée', '签退': 'Sortie',
+        '今日出勤': 'Présence du jour', '正在上班': 'Au travail', '今日工时': 'Heures du jour', '本月工时': 'Heures du mois',
+        '运输记录': 'Transport', '车牌号': 'Plaque', '工厂': 'Usine', '货物类型': 'Type de cargaison',
+        '车牌比对': 'Comparaison plaques', '授权车牌': 'Plaques autorisées', '工厂管理': 'Gestion usines',
+        '车队车辆': 'Véhicules flotte', '应用版本': 'Version app', '接口地址': 'Adresse API', '构建时间': 'Date de build'
+    }
+};
+
+I18n._translatePhrase = function (text) {
+    if (!text || this._lang === 'zh-CN') return text;
+    var map = this._phraseMaps[this._lang] || {};
+    return map[text] || text;
+};
+
+I18n._applyPhraseMap = function (root) {
+    root = root || document.body;
+    if (!root) return;
+    var map = this._phraseMaps[this._lang] || {};
+    if (this._lang === 'zh-CN' || !Object.keys(map).length) return;
+
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (node) {
+            var value = node.nodeValue.trim();
+            if (!value || value.length > 80) return NodeFilter.FILTER_REJECT;
+            if (node.parentElement && ['SCRIPT', 'STYLE'].includes(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+        }
+    });
+    var nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(function (node) {
+        var raw = node.nodeValue;
+        var leading = raw.match(/^\s*/)[0];
+        var trailing = raw.match(/\s*$/)[0];
+        var key = raw.trim();
+        if (map[key]) node.nodeValue = leading + map[key] + trailing;
+    });
+
+    root.querySelectorAll('input[placeholder], textarea[placeholder], [title], [aria-label]').forEach(function (el) {
+        ['placeholder', 'title', 'aria-label'].forEach(function (attr) {
+            var value = el.getAttribute(attr);
+            if (value && map[value]) el.setAttribute(attr, map[value]);
+        });
+    });
+};
+
+I18n._observeDom = function () {
+    if (this._observer || !document.body) return;
+    this._observer = new MutationObserver((mutations) => {
+        if (this._lang === 'zh-CN') return;
+        mutations.forEach(mutation => {
+            mutation.addedNodes.forEach(node => {
+                if (node.nodeType === Node.ELEMENT_NODE) this._applyPhraseMap(node);
+            });
+        });
+    });
+    this._observer.observe(document.body, { childList: true, subtree: true });
+};
+
+I18n._baseApplyAll = I18n.applyAll.bind(I18n);
+I18n.applyAll = function () {
+    this._baseApplyAll();
+    this._applyPhraseMap(document.body);
+    this._observeDom();
+};
+
+I18n._baseSwitchLang = I18n.switchLang.bind(I18n);
+I18n.switchLang = function (lang) {
+    if (!this.supported.includes(lang)) return;
+    localStorage.setItem('mineops_lang', lang);
+    window.location.reload();
 };
 
 // 全局导出

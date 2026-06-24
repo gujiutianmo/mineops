@@ -23,3 +23,13 @@ Thumbs.db
 
 # Node
 node_modules/
+.npm-cache/
+.swc/
+
+# Local deployment/runtime artifacts
+*.exe
+*.zip
+*.log
+*-log.txt
+tunnel-url.txt
+cloudflare-url.txt

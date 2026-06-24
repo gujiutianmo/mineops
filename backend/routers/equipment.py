@@ -1,26 +1,53 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
-from sqlalchemy import func, extract, and_
+from sqlalchemy import func, extract, and_, or_
 from typing import List
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from database import get_db
-from models import Equipment, EquipmentWorkLog, EquipmentMaintenance, Mine
+from models import Equipment, EquipmentWorkLog, EquipmentWorkSession, EquipmentMaintenance, Mine
 from schemas.equipment import (
     EquipmentCreate, EquipmentUpdate, EquipmentOut,
     ParseRequest, ParsedRecord, ParseResponse, BatchFuelRequest,
     WorkLogOut, WorkLogCreate, WorkLogUpdate
 )
 from auth import get_current_active_user
-from utils.permissions import check_mine_access, filter_by_mine, get_target_mine_id
+from utils.permissions import (
+    check_mine_access,
+    filter_by_mine,
+    filter_equipment_visibility,
+    get_target_mine_id,
+)
 from utils.crud_helpers import get_object_or_404
 from utils.excel_utils import create_template, create_export, parse_import_file
+from utils.worklog_time import parse_time_ranges
 from services.smart_parser import SmartParser
 from services.fleet_matcher import FleetMatcher
 
 router = APIRouter()
+MANUAL_SESSION_STATUS = "manual"
+FINISHED_SESSION_STATUSES = ["completed", MANUAL_SESSION_STATUS]
+DEFAULT_WORKLOG_START_TIME = time(hour=8)
 
 EQUIPMENT_HEADERS = ["设备编号", "设备名称", "品牌", "型号", "设备类型", "车辆编号", "短编号", "别名"]
 WORKLOG_TEMPLATE_HEADERS = ["日期", "设备编号", "工时(小时)", "油耗(升)", "备注"]
+
+EQUIPMENT_CATEGORY_ORDER = {
+    "挖掘机": 10,
+    "破碎锤": 20,
+    "铲车": 30,
+    "矿卡": 50,
+    "短车": 70,
+    "压路机": 80,
+}
+
+EQUIPMENT_BRAND_ORDER = {
+    "三一": 10,
+    "徐工": 20,
+    "柳工": 30,
+    "临工": 40,
+}
 
 
 def _get_and_check(db, model, obj_id, current_user):
@@ -34,6 +61,227 @@ def _get_and_check(db, model, obj_id, current_user):
     return obj
 
 
+def _equipment_category_sort_value(equipment: Equipment) -> int:
+    category = equipment.category or ""
+    brand = equipment.brand or ""
+    if category == "矿卡":
+        if brand == "徐工":
+            return 40
+        if brand == "临工":
+            return 50
+        return 60
+    return EQUIPMENT_CATEGORY_ORDER.get(category, 900)
+
+
+def _equipment_brand_sort_value(equipment: Equipment) -> int:
+    return EQUIPMENT_BRAND_ORDER.get(equipment.brand or "", 900)
+
+
+def _equipment_number_sort_value(equipment: Equipment):
+    candidates = [
+        equipment.short_num or "",
+        equipment.vehicle_num or "",
+        equipment.code or "",
+        equipment.name or "",
+    ]
+    for value in candidates:
+        text = str(value).strip().upper()
+        if not text:
+            continue
+        match = re.search(r'(?<!\d)([A-Z]?)(\d+)(?!\d)', text)
+        if match:
+            prefix, number = match.groups()
+            prefix_rank = 0 if not prefix else ord(prefix[0]) - ord('A') + 1
+            return (prefix_rank, int(number))
+    return (999, 999999)
+
+
+def _equipment_sort_key(equipment: Equipment):
+    return (
+        _equipment_category_sort_value(equipment),
+        _equipment_brand_sort_value(equipment),
+        _equipment_number_sort_value(equipment),
+        equipment.code or "",
+        equipment.name or "",
+    )
+
+
+def _sort_equipments(equipments):
+    return sorted(equipments, key=_equipment_sort_key)
+
+
+def _ensure_equipment_can_log(equipment: Equipment, target_mine: str, current_user):
+    """工作日志只能记录到全局设备或目标矿山自己的设备。"""
+    if current_user.role != "super" and equipment.mine_id is not None and equipment.mine_id != current_user.mine_id:
+        raise HTTPException(status_code=403, detail="Permission denied: 不能使用其他矿山的设备")
+    if equipment.mine_id is not None and equipment.mine_id != target_mine:
+        raise HTTPException(status_code=400, detail="equipment_id does not belong to target mine")
+
+
+def _get_account_display_name(current_user):
+    return current_user.display_name or getattr(current_user, "username", "") or ""
+
+
+def _parse_worklog_start_time(work_date, time_detail: str = ""):
+    if isinstance(work_date, datetime):
+        work_day = work_date.date()
+    else:
+        work_day = work_date
+
+    detail = (time_detail or "").strip()
+    match = re.search(r"(?<!\d)([01]?\d|2[0-3])(?:(?::|\.)(\d{1,2}))?", detail)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        if 0 <= minute <= 59:
+            return datetime.combine(work_day, time(hour=hour, minute=minute))
+
+    return datetime.combine(work_day, DEFAULT_WORKLOG_START_TIME)
+
+
+def _worklog_session_remark(worklog: EquipmentWorkLog):
+    remark = (worklog.remark or worklog.raw_text or "").strip()
+    if remark:
+        return f"Imported from worklog: {remark}"[:500]
+    return "Imported from worklog"
+
+
+def _sync_worklog_to_session(
+    db: Session,
+    worklog: EquipmentWorkLog,
+    target_mine: str,
+    current_user,
+    shift: str = "",
+    strict_time: bool = False,
+):
+    work_hours = float(worklog.work_hours or 0)
+    parsed_time = parse_time_ranges(
+        worklog.time_detail,
+        work_date=worklog.work_date,
+        allow_day_rollover=shift == "晚班",
+    )
+    if strict_time and parsed_time["errors"]:
+        raise HTTPException(status_code=400, detail="；".join(parsed_time["errors"]))
+    if work_hours <= 0:
+        if strict_time and parsed_time["segments"]:
+            raise HTTPException(status_code=400, detail="时间段合计工时与解析工时不一致，已阻止保存")
+        return None
+
+    remark = _worklog_session_remark(worklog)
+    if parsed_time["segments"]:
+        if abs(float(parsed_time["hours"]) - work_hours) > 0.01:
+            raise HTTPException(status_code=400, detail="时间段合计工时与解析工时不一致，已阻止保存")
+        worklog.time_detail = parsed_time["canonical"]
+        synced = []
+        for segment in parsed_time["segments"]:
+            exact_query = db.query(EquipmentWorkSession).filter(
+                EquipmentWorkSession.mine_id == target_mine,
+                EquipmentWorkSession.equipment_id == worklog.equipment_id,
+                EquipmentWorkSession.start_time == segment["start_time"],
+                EquipmentWorkSession.end_time == segment["end_time"],
+                EquipmentWorkSession.status == MANUAL_SESSION_STATUS,
+            )
+            if not strict_time:
+                exact_query = exact_query.filter(EquipmentWorkSession.remark == remark)
+            existing = exact_query.first()
+            if existing:
+                if strict_time:
+                    raise HTTPException(status_code=400, detail="相同设备和时间段已存在，已阻止重复补录")
+                existing.duration_hours = segment["duration_hours"]
+                existing.operator_account_id = current_user.id
+                existing.operator_name = _get_account_display_name(current_user)
+                synced.append(existing)
+                continue
+            if strict_time:
+                overlap = db.query(EquipmentWorkSession).filter(
+                    EquipmentWorkSession.mine_id == target_mine,
+                    EquipmentWorkSession.equipment_id == worklog.equipment_id,
+                    EquipmentWorkSession.start_time < segment["end_time"],
+                    or_(
+                        EquipmentWorkSession.end_time.is_(None),
+                        EquipmentWorkSession.end_time > segment["start_time"],
+                    ),
+                ).first()
+                if overlap:
+                    raise HTTPException(status_code=400, detail="该设备的时间段与已有工时记录重叠，已阻止保存")
+            record = EquipmentWorkSession(
+                mine_id=target_mine,
+                equipment_id=worklog.equipment_id,
+                operator_account_id=current_user.id,
+                operator_name=_get_account_display_name(current_user),
+                start_time=segment["start_time"],
+                end_time=segment["end_time"],
+                duration_hours=segment["duration_hours"],
+                status=MANUAL_SESSION_STATUS,
+                remark=remark,
+            )
+            db.add(record)
+            synced.append(record)
+        return synced
+    if strict_time:
+        raise HTTPException(status_code=400, detail="有工时的补录记录必须包含明确时间段")
+
+    start_time = _parse_worklog_start_time(worklog.work_date, worklog.time_detail)
+    end_time = start_time + timedelta(hours=work_hours)
+    duration_hours = round(work_hours, 2)
+    existing = db.query(EquipmentWorkSession).filter(
+        EquipmentWorkSession.mine_id == target_mine,
+        EquipmentWorkSession.equipment_id == worklog.equipment_id,
+        EquipmentWorkSession.start_time == start_time,
+        EquipmentWorkSession.end_time == end_time,
+        EquipmentWorkSession.status == MANUAL_SESSION_STATUS,
+        EquipmentWorkSession.remark == remark,
+    ).first()
+    if existing:
+        existing.duration_hours = duration_hours
+        existing.operator_account_id = current_user.id
+        existing.operator_name = _get_account_display_name(current_user)
+        return existing
+
+    record = EquipmentWorkSession(
+        mine_id=target_mine,
+        equipment_id=worklog.equipment_id,
+        operator_account_id=current_user.id,
+        operator_name=_get_account_display_name(current_user),
+        start_time=start_time,
+        end_time=end_time,
+        duration_hours=duration_hours,
+        status=MANUAL_SESSION_STATUS,
+        remark=remark,
+    )
+    db.add(record)
+    return record
+
+
+def _worklog_remark(remark: str, shift: str) -> str:
+    parts = []
+    if shift:
+        parts.append(f"班次：{shift}")
+    if remark:
+        parts.append(f"备注：{remark}")
+    return "；".join(parts)
+
+
+def _ensure_no_duplicate_strict_worklog(
+    db: Session,
+    worklog: WorkLogCreate,
+    target_mine: str,
+    remark: str,
+):
+    if not worklog.strict_time:
+        return
+    existing = db.query(EquipmentWorkLog).filter(
+        EquipmentWorkLog.mine_id == target_mine,
+        EquipmentWorkLog.equipment_id == worklog.equipment_id,
+        EquipmentWorkLog.work_date == worklog.work_date,
+        EquipmentWorkLog.time_detail == (worklog.time_detail or ""),
+        EquipmentWorkLog.raw_text == (worklog.raw_text or ""),
+        EquipmentWorkLog.remark == remark,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="该设备补录内容已经存在，已阻止重复导入")
+
+
 def _get_equipments_as_dicts(db, target_mine=None, current_user=None):
     """获取设备的 dict 列表（供 SmartParser/FleetMatcher 使用）
 
@@ -42,11 +290,9 @@ def _get_equipments_as_dicts(db, target_mine=None, current_user=None):
     - mine子用户: 获取全局设备(mine_id=None) + 自己矿山的设备
     """
     query = db.query(Equipment)
-    if current_user and current_user.role != "super":
-        query = query.filter(
-            (Equipment.mine_id == None) | (Equipment.mine_id == current_user.mine_id)
-        )
-    equips = query.all()
+    if current_user:
+        query = filter_equipment_visibility(query, Equipment, current_user, target_mine)
+    equips = _sort_equipments(query.all())
     return [
         {
             'id': eq.id, 'code': eq.code, 'name': eq.name,
@@ -69,16 +315,9 @@ def read_equipments(
     current_user=Depends(get_current_active_user)
 ):
     """获取设备列表 - super全部，miner只能看全局+自己矿山的设备"""
-    query = db.query(Equipment)
-    if current_user.role != "super":
-        # 矿山子用户：全局设备 + 自己矿山的设备
-        query = query.filter(
-            (Equipment.mine_id == None) | (Equipment.mine_id == current_user.mine_id)
-        )
-    elif mine_id:
-        # 超级管理员筛选矿山
-        query = query.filter((Equipment.mine_id == mine_id) | (Equipment.mine_id == None))
-    return query.offset(skip).limit(limit).all()
+    query = filter_equipment_visibility(db.query(Equipment), Equipment, current_user, mine_id)
+    equipments = _sort_equipments(query.all())
+    return equipments[skip:skip + limit]
 
 
 @router.post("/", response_model=EquipmentOut)
@@ -169,7 +408,7 @@ def create_worklog(
     current_user=Depends(get_current_active_user)
 ):
     """创建单条工作日志"""
-    equip = get_object_or_404(db, Equipment, worklog.equipment_id)
+    equip = _get_and_check(db, Equipment, worklog.equipment_id, current_user)
     target_mine = get_target_mine_id(current_user, worklog.mine_id) or equip.mine_id
     if not target_mine:
         if current_user.role == "super":
@@ -181,19 +420,30 @@ def create_worklog(
         else:
             raise HTTPException(status_code=400, detail="mine_id is required for creating worklogs")
     check_mine_access(current_user, target_mine)
+    _ensure_equipment_can_log(equip, target_mine, current_user)
 
+    remark = _worklog_remark(worklog.remark or "", worklog.shift or "")
+    _ensure_no_duplicate_strict_worklog(db, worklog, target_mine, remark)
     db_log = EquipmentWorkLog(
         mine_id=target_mine,
         equipment_id=worklog.equipment_id,
         work_date=worklog.work_date,
         work_hours=worklog.work_hours,
         fuel_liters=worklog.fuel_liters,
-        remark=worklog.remark or "",
+        remark=remark,
         time_detail=worklog.time_detail or "",
         raw_text=worklog.raw_text or "",
         created_by=current_user.display_name
     )
     db.add(db_log)
+    _sync_worklog_to_session(
+        db,
+        db_log,
+        target_mine,
+        current_user,
+        shift=worklog.shift or "",
+        strict_time=worklog.strict_time,
+    )
     db.commit()
     db.refresh(db_log)
 
@@ -222,7 +472,7 @@ def batch_create_worklogs(
     """批量创建工作日志（从解析结果直接保存）"""
     result = []
     for wl in worklogs:
-        equip = get_object_or_404(db, Equipment, wl.equipment_id)
+        equip = _get_and_check(db, Equipment, wl.equipment_id, current_user)
         target_mine = get_target_mine_id(current_user, wl.mine_id) or equip.mine_id
         if not target_mine:
             if current_user.role == "super":
@@ -234,19 +484,31 @@ def batch_create_worklogs(
             else:
                 raise HTTPException(status_code=400, detail="mine_id is required for creating worklogs")
         check_mine_access(current_user, target_mine)
+        _ensure_equipment_can_log(equip, target_mine, current_user)
 
+        remark = _worklog_remark(wl.remark or "", wl.shift or "")
+        _ensure_no_duplicate_strict_worklog(db, wl, target_mine, remark)
         db_log = EquipmentWorkLog(
             mine_id=target_mine,
             equipment_id=wl.equipment_id,
             work_date=wl.work_date,
             work_hours=wl.work_hours,
             fuel_liters=wl.fuel_liters,
-            remark=wl.remark or "",
+            remark=remark,
             time_detail=wl.time_detail or "",
             raw_text=wl.raw_text or "",
             created_by=current_user.display_name
         )
         db.add(db_log)
+        _sync_worklog_to_session(
+            db,
+            db_log,
+            target_mine,
+            current_user,
+            shift=wl.shift or "",
+            strict_time=wl.strict_time,
+        )
+        db.flush()
         result.append({
             "id": db_log.id,
             "equipment_id": db_log.equipment_id,
@@ -272,7 +534,13 @@ def batch_fuel_entry(
     current_user=Depends(get_current_active_user)
 ):
     """批量录入加油记录"""
-    check_mine_access(current_user, req.mine_id)
+    target_mine = get_target_mine_id(current_user, req.mine_id)
+    if target_mine is None and current_user.role == "super":
+        first_mine = db.query(Mine).order_by(Mine.created_at).first()
+        target_mine = first_mine.id if first_mine else None
+    if target_mine is None:
+        raise HTTPException(status_code=400, detail="mine_id is required")
+    check_mine_access(current_user, target_mine)
 
     try:
         work_date_parsed = date.fromisoformat(req.date)
@@ -284,8 +552,10 @@ def batch_fuel_entry(
         equip = db.query(Equipment).filter(Equipment.id == eq_id).first()
         if not equip:
             continue
+        _ensure_equipment_can_log(equip, target_mine, current_user)
 
         existing = db.query(EquipmentWorkLog).filter(
+            EquipmentWorkLog.mine_id == target_mine,
             EquipmentWorkLog.equipment_id == eq_id,
             EquipmentWorkLog.work_date == work_date_parsed
         ).first()
@@ -295,7 +565,7 @@ def batch_fuel_entry(
             existing.remark = (existing.remark or "") + f"; {req.memo}" if req.memo else existing.remark
         else:
             db.add(EquipmentWorkLog(
-                mine_id=req.mine_id,
+                mine_id=target_mine,
                 equipment_id=eq_id,
                 work_date=work_date_parsed,
                 work_hours=0,
@@ -509,14 +779,8 @@ def export_equipment_excel(
     current_user=Depends(get_current_active_user)
 ):
     """导出设备列表"""
-    query = db.query(Equipment)
-    if current_user.role != "super":
-        query = query.filter(
-            (Equipment.mine_id == None) | (Equipment.mine_id == current_user.mine_id)
-        )
-    elif mine_id:
-        query = query.filter((Equipment.mine_id == mine_id) | (Equipment.mine_id == None))
-    equipments = query.all()
+    query = filter_equipment_visibility(db.query(Equipment), Equipment, current_user, mine_id)
+    equipments = _sort_equipments(query.all())
     rows = [[eq.code, eq.name, eq.brand, eq.type, eq.category or "", eq.vehicle_num or "", eq.short_num or "", eq.aliases or ""] for eq in equipments]
     return create_export(EQUIPMENT_HEADERS, rows, "设备列表.xlsx", [20, 25, 20, 20, 15, 12, 10, 30])
 
@@ -527,6 +791,7 @@ def export_equipment_excel(
 def get_equipment_utilization(
     year: int = None,
     month: int = None,
+    mine_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
@@ -536,38 +801,53 @@ def get_equipment_utilization(
     month = month or today.month
 
     # 获取可见设备
-    equip_query = db.query(Equipment)
-    if current_user.role != "super":
-        equip_query = equip_query.filter(
-            (Equipment.mine_id == None) | (Equipment.mine_id == current_user.mine_id)
-        )
-    equipments = equip_query.filter(Equipment.status == "active").all()
+    equip_query = filter_equipment_visibility(db.query(Equipment), Equipment, current_user, mine_id)
+    equipments = _sort_equipments(equip_query.filter(Equipment.status == "active").all())
 
     days_in_month = 30  # approx
     if month and year:
         import calendar
         days_in_month = calendar.monthrange(year, month)[1]
 
-    # 按月汇总所有工作日志 - 修复：使用 allow_global 让子用户看到全局设备的日志
-    worklog_summary = db.query(
+    session_summary = db.query(
+        EquipmentWorkSession.equipment_id,
+        func.sum(EquipmentWorkSession.duration_hours).label("total_hours"),
+        func.count(func.distinct(func.date(EquipmentWorkSession.start_time))).label("work_days"),
+        func.count(EquipmentWorkSession.id).label("session_count")
+    ).filter(
+        extract('year', EquipmentWorkSession.start_time) == year,
+        extract('month', EquipmentWorkSession.start_time) == month,
+        EquipmentWorkSession.status.in_(FINISHED_SESSION_STATUSES)
+    )
+    session_summary = filter_by_mine(session_summary, EquipmentWorkSession, "mine_id", current_user, mine_id)
+    session_summary = session_summary.group_by(EquipmentWorkSession.equipment_id).all()
+
+    summary_map = {}
+    for s in session_summary:
+        summary_map[s.equipment_id] = {
+            "total_hours": float(s.total_hours or 0),
+            "total_fuel": 0,
+            "work_days": s.work_days or 0,
+            "session_count": s.session_count or 0
+        }
+
+    fuel_summary = db.query(
         EquipmentWorkLog.equipment_id,
-        func.sum(EquipmentWorkLog.work_hours).label("total_hours"),
-        func.sum(EquipmentWorkLog.fuel_liters).label("total_fuel"),
-        func.count(EquipmentWorkLog.id).label("work_days")
+        func.sum(EquipmentWorkLog.fuel_liters).label("total_fuel")
     ).filter(
         extract('year', EquipmentWorkLog.work_date) == year,
         extract('month', EquipmentWorkLog.work_date) == month
     )
-    worklog_summary = filter_by_mine(worklog_summary, EquipmentWorkLog, "mine_id", current_user)
-    worklog_summary = worklog_summary.group_by(EquipmentWorkLog.equipment_id).all()
-
-    summary_map = {}
-    for s in worklog_summary:
-        summary_map[s.equipment_id] = {
-            "total_hours": float(s.total_hours or 0),
-            "total_fuel": float(s.total_fuel or 0),
-            "work_days": s.work_days or 0
-        }
+    fuel_summary = filter_by_mine(fuel_summary, EquipmentWorkLog, "mine_id", current_user, mine_id)
+    fuel_summary = fuel_summary.group_by(EquipmentWorkLog.equipment_id).all()
+    for fuel in fuel_summary:
+        item = summary_map.setdefault(fuel.equipment_id, {
+            "total_hours": 0,
+            "total_fuel": 0,
+            "work_days": 0,
+            "session_count": 0
+        })
+        item["total_fuel"] = float(fuel.total_fuel or 0)
 
     result = []
     total_hours_all = 0
@@ -575,7 +855,7 @@ def get_equipment_utilization(
     active_count = 0
 
     for eq in equipments:
-        s = summary_map.get(eq.id, {"total_hours": 0, "total_fuel": 0, "work_days": 0})
+        s = summary_map.get(eq.id, {"total_hours": 0, "total_fuel": 0, "work_days": 0, "session_count": 0})
         hours = s["total_hours"]
         fuel = s["total_fuel"]
         util_rate = round((hours / (days_in_month * 8)) * 100, 1) if hours > 0 else 0
@@ -590,6 +870,7 @@ def get_equipment_utilization(
             "total_hours": hours,
             "total_fuel": fuel,
             "work_days": s["work_days"],
+            "session_count": s["session_count"],
             "utilization_rate": util_rate,
             "avg_daily_hours": round(hours / days_in_month, 2),
             "avg_daily_fuel": round(fuel / max(s["work_days"], 1), 2) if fuel > 0 else 0
@@ -704,27 +985,31 @@ def get_equipment_status_overview(
     today = date.today()
     seven_days_ago = today - timedelta(days=7)
     
-    # 获取可见设备
-    equip_query = db.query(Equipment)
-    if current_user.role != "super":
-        equip_query = equip_query.filter(
-            (Equipment.mine_id == None) | (Equipment.mine_id == current_user.mine_id)
-        )
-    all_equipments = equip_query.filter(Equipment.status == "active").all()
+    equip_query = filter_equipment_visibility(db.query(Equipment), Equipment, current_user)
+    all_equipments = _sort_equipments(equip_query.all())
+    visible_equipment_ids = [eq.id for eq in all_equipments]
     
     # 今天有工作日志的设备ID
     today_working = set()
     today_logs = db.query(EquipmentWorkLog.equipment_id).filter(
         EquipmentWorkLog.work_date == today,
         EquipmentWorkLog.work_hours > 0
-    ).distinct().all()
+    )
+    today_logs = filter_by_mine(today_logs, EquipmentWorkLog, "mine_id", current_user)
+    if visible_equipment_ids:
+        today_logs = today_logs.filter(EquipmentWorkLog.equipment_id.in_(visible_equipment_ids))
+    today_logs = today_logs.distinct().all()
     today_working = {row[0] for row in today_logs}
     
     # 进行中的维护记录
     active_maintenance = {}
     maints = db.query(EquipmentMaintenance).filter(
         EquipmentMaintenance.status.in_(["pending", "in_progress"])
-    ).all()
+    )
+    maints = filter_by_mine(maints, EquipmentMaintenance, "mine_id", current_user)
+    if visible_equipment_ids:
+        maints = maints.filter(EquipmentMaintenance.equipment_id.in_(visible_equipment_ids))
+    maints = maints.all()
     for m in maints:
         active_maintenance[m.equipment_id] = {
             "type": m.maintenance_type,
@@ -740,7 +1025,11 @@ def get_equipment_status_overview(
     ).filter(
         EquipmentWorkLog.work_date >= seven_days_ago,
         EquipmentWorkLog.work_date <= today
-    ).group_by(EquipmentWorkLog.equipment_id).all()
+    )
+    recent_work = filter_by_mine(recent_work, EquipmentWorkLog, "mine_id", current_user)
+    if visible_equipment_ids:
+        recent_work = recent_work.filter(EquipmentWorkLog.equipment_id.in_(visible_equipment_ids))
+    recent_work = recent_work.group_by(EquipmentWorkLog.equipment_id).all()
     recent_work_map = {}
     for row in recent_work:
         recent_work_map[row[0]] = {
@@ -757,7 +1046,7 @@ def get_equipment_status_overview(
         
         if eq.status == "broken":
             status_counts["broken"] += 1
-        elif eq_id in active_maintenance:
+        elif eq.status == "maintenance" or eq_id in active_maintenance:
             status_counts["maintenance"] += 1
         elif eq_id in today_working:
             status_counts["working"] += 1
@@ -911,20 +1200,40 @@ def _build_worklog_query(db, current_user, year, month):
 def get_monthly_detail(
     year: int = None,
     month: int = None,
+    mine_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    query, _, _ = _build_worklog_query(db, current_user, year, month)
-    results = query.order_by(EquipmentWorkLog.work_date).all()
+    today = date.today()
+    year = year or today.year
+    month = month or today.month
+    query = db.query(EquipmentWorkSession, Equipment, Mine).join(
+        Equipment, EquipmentWorkSession.equipment_id == Equipment.id
+    ).outerjoin(
+        Mine, EquipmentWorkSession.mine_id == Mine.id
+    ).filter(
+        extract('year', EquipmentWorkSession.start_time) == year,
+        extract('month', EquipmentWorkSession.start_time) == month,
+        EquipmentWorkSession.status.in_(["completed", "manual"])
+    )
+    query = filter_by_mine(query, EquipmentWorkSession, "mine_id", current_user, mine_id)
+    results = query.order_by(EquipmentWorkSession.start_time).all()
     return [
         {
+            "mine_id": session.mine_id,
+            "mine_name": mine.name if mine else "",
             "equipment_code": eq.code,
             "equipment_name": eq.name,
-            "work_date": str(log.work_date),
-            "work_hours": float(log.work_hours or 0),
-            "fuel_liters": float(log.fuel_liters or 0)
+            "work_date": str(session.start_time.date()) if session.start_time else "",
+            "start_time": session.start_time,
+            "end_time": session.end_time,
+            "work_hours": float(session.duration_hours or 0),
+            "duration_hours": float(session.duration_hours or 0),
+            "status": session.status,
+            "operator_name": session.operator_name or "",
+            "remark": session.remark or "",
         }
-        for log, eq in results
+        for session, eq, mine in results
     ]
 
 
@@ -932,6 +1241,7 @@ def get_monthly_detail(
 def get_monthly_summary(
     year: int = None,
     month: int = None,
+    mine_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
@@ -939,22 +1249,57 @@ def get_monthly_summary(
     year = year or today.year
     month = month or today.month
 
-    query = db.query(
+    session_query = db.query(
+        EquipmentWorkSession.mine_id.label("mine_id"),
+        Mine.name.label("mine_name"),
+        Equipment.id.label("equipment_id"),
         Equipment.code.label("equipment_code"),
         Equipment.name.label("equipment_name"),
-        func.sum(EquipmentWorkLog.work_hours).label("total_hours"),
+        func.sum(EquipmentWorkSession.duration_hours).label("total_hours"),
+        func.count(func.distinct(func.date(EquipmentWorkSession.start_time))).label("work_days"),
+        func.count(EquipmentWorkSession.id).label("session_count"),
+    ).join(EquipmentWorkSession, Equipment.id == EquipmentWorkSession.equipment_id).outerjoin(
+        Mine, EquipmentWorkSession.mine_id == Mine.id
+    ).filter(
+        extract('year', EquipmentWorkSession.start_time) == year,
+        extract('month', EquipmentWorkSession.start_time) == month,
+        EquipmentWorkSession.status.in_(["completed", "manual"])
+    )
+    session_query = filter_by_mine(session_query, EquipmentWorkSession, "mine_id", current_user, mine_id)
+    session_rows = session_query.group_by(
+        EquipmentWorkSession.mine_id,
+        Mine.name,
+        Equipment.id,
+        Equipment.code,
+        Equipment.name
+    ).all()
+
+    fuel_query = db.query(
+        EquipmentWorkLog.mine_id,
+        EquipmentWorkLog.equipment_id,
         func.sum(EquipmentWorkLog.fuel_liters).label("total_fuel")
-    ).join(EquipmentWorkLog, Equipment.id == EquipmentWorkLog.equipment_id).filter(
+    ).filter(
         extract('year', EquipmentWorkLog.work_date) == year,
         extract('month', EquipmentWorkLog.work_date) == month
     )
-    query = filter_by_mine(query, EquipmentWorkLog, "mine_id", current_user)
+    fuel_query = filter_by_mine(fuel_query, EquipmentWorkLog, "mine_id", current_user, mine_id)
+    fuel_map = {
+        (row.mine_id, row.equipment_id): float(row.total_fuel or 0)
+        for row in fuel_query.group_by(EquipmentWorkLog.mine_id, EquipmentWorkLog.equipment_id).all()
+    }
 
-    results = query.group_by(Equipment.id, Equipment.code, Equipment.name).all()
     return [
-        {"equipment_code": r.equipment_code, "equipment_name": r.equipment_name,
-         "total_hours": float(r.total_hours or 0), "total_fuel": float(r.total_fuel or 0)}
-        for r in results
+        {
+            "mine_id": row.mine_id,
+            "mine_name": row.mine_name or "",
+            "equipment_code": row.equipment_code,
+            "equipment_name": row.equipment_name,
+            "total_hours": float(row.total_hours or 0),
+            "total_fuel": fuel_map.get((row.mine_id, row.equipment_id), 0),
+            "work_days": int(row.work_days or 0),
+            "session_count": int(row.session_count or 0),
+        }
+        for row in session_rows
     ]
 
 
@@ -962,23 +1307,48 @@ def get_monthly_summary(
 def export_monthly_detail(
     year: int = None,
     month: int = None,
+    mine_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    query, year, month = _build_worklog_query(db, current_user, year, month)
-    logs = query.order_by(EquipmentWorkLog.work_date).all()
-    headers = ["日期", "设备编号", "设备名称", "工时(小时)", "油耗(升)", "备注"]
+    today = date.today()
+    year = year or today.year
+    month = month or today.month
+    query = db.query(EquipmentWorkSession, Equipment, Mine).join(
+        Equipment, EquipmentWorkSession.equipment_id == Equipment.id
+    ).outerjoin(
+        Mine, EquipmentWorkSession.mine_id == Mine.id
+    ).filter(
+        extract('year', EquipmentWorkSession.start_time) == year,
+        extract('month', EquipmentWorkSession.start_time) == month,
+        EquipmentWorkSession.status.in_(["completed", "manual"])
+    )
+    query = filter_by_mine(query, EquipmentWorkSession, "mine_id", current_user, mine_id)
+    sessions = query.order_by(EquipmentWorkSession.start_time).all()
+    headers = ["日期", "矿山", "设备编号", "设备名称", "开始时间", "结束时间", "工时(小时)", "状态", "操作员", "备注"]
     rows = [
-        [str(log.work_date), eq.code, eq.name, float(log.work_hours or 0), float(log.fuel_liters or 0), log.remark or ""]
-        for log, eq in logs
+        [
+            str(session.start_time.date()) if session.start_time else "",
+            mine.name if mine else "",
+            eq.code,
+            eq.name,
+            session.start_time.strftime("%Y-%m-%d %H:%M") if session.start_time else "",
+            session.end_time.strftime("%Y-%m-%d %H:%M") if session.end_time else "",
+            float(session.duration_hours or 0),
+            session.status,
+            session.operator_name or "",
+            session.remark or "",
+        ]
+        for session, eq, mine in sessions
     ]
-    return create_export(headers, rows, f"设备明细报表_{year}_{month}.xlsx", [18, 18, 18, 18, 18, 18])
+    return create_export(headers, rows, f"设备工作时间明细表_{year}_{month}.xlsx", [18, 18, 18, 18, 20, 20, 18, 14, 18, 30])
 
 
 @router.get("/reports/monthly-summary/export")
 def export_monthly_summary(
     year: int = None,
     month: int = None,
+    mine_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
@@ -986,28 +1356,53 @@ def export_monthly_summary(
     year = year or today.year
     month = month or today.month
 
-    query = db.query(
-        Equipment.code, Equipment.name,
-        func.sum(EquipmentWorkLog.work_hours).label("total_hours"),
-        func.sum(EquipmentWorkLog.fuel_liters).label("total_fuel"),
-        func.count(EquipmentWorkLog.id).label("work_days")
-    ).join(EquipmentWorkLog, Equipment.id == EquipmentWorkLog.equipment_id).filter(
+    session_query = db.query(
+        EquipmentWorkSession.mine_id.label("mine_id"),
+        Mine.name.label("mine_name"),
+        Equipment.id.label("equipment_id"),
+        Equipment.code,
+        Equipment.name,
+        func.sum(EquipmentWorkSession.duration_hours).label("total_hours"),
+        func.count(func.distinct(func.date(EquipmentWorkSession.start_time))).label("work_days"),
+        func.count(EquipmentWorkSession.id).label("session_count"),
+    ).join(EquipmentWorkSession, Equipment.id == EquipmentWorkSession.equipment_id).outerjoin(
+        Mine, EquipmentWorkSession.mine_id == Mine.id
+    ).filter(
+        extract('year', EquipmentWorkSession.start_time) == year,
+        extract('month', EquipmentWorkSession.start_time) == month,
+        EquipmentWorkSession.status.in_(["completed", "manual"])
+    )
+    session_query = filter_by_mine(session_query, EquipmentWorkSession, "mine_id", current_user, mine_id)
+    summaries = session_query.group_by(
+        EquipmentWorkSession.mine_id,
+        Mine.name,
+        Equipment.id,
+        Equipment.code,
+        Equipment.name
+    ).all()
+
+    fuel_query = db.query(
+        EquipmentWorkLog.mine_id,
+        EquipmentWorkLog.equipment_id,
+        func.sum(EquipmentWorkLog.fuel_liters).label("total_fuel")
+    ).filter(
         extract('year', EquipmentWorkLog.work_date) == year,
         extract('month', EquipmentWorkLog.work_date) == month
     )
-    query = filter_by_mine(query, EquipmentWorkLog, "mine_id", current_user)
+    fuel_query = filter_by_mine(fuel_query, EquipmentWorkLog, "mine_id", current_user, mine_id)
+    fuel_map = {
+        (row.mine_id, row.equipment_id): float(row.total_fuel or 0)
+        for row in fuel_query.group_by(EquipmentWorkLog.mine_id, EquipmentWorkLog.equipment_id).all()
+    }
 
-    summaries = query.group_by(Equipment.id, Equipment.code, Equipment.name).all()
-    headers = ["设备编号", "设备名称", "总工时", "总油耗", "日均油耗"]
+    headers = ["矿山", "设备编号", "设备名称", "月度总工时", "加油升数", "工作天数", "工时记录数"]
     rows = []
     for s in summaries:
         total_hours = float(s.total_hours or 0)
-        total_fuel = float(s.total_fuel or 0)
-        work_days = s.work_days or 1
-        avg_fuel = total_fuel / work_days if work_days > 0 else 0
-        rows.append([s.code, s.name, total_hours, total_fuel, round(avg_fuel, 2)])
+        total_fuel = fuel_map.get((s.mine_id, s.equipment_id), 0)
+        rows.append([s.mine_name or "", s.code, s.name, total_hours, total_fuel, int(s.work_days or 0), int(s.session_count or 0)])
 
-    return create_export(headers, rows, f"设备汇总报表_{year}_{month}.xlsx", [18, 18, 18, 18, 18])
+    return create_export(headers, rows, f"设备月度汇总工时表_{year}_{month}.xlsx", [18, 18, 18, 18, 18, 18, 18])
 
 
 # ========== Smart Parse (Enhanced) ==========
@@ -1036,10 +1431,34 @@ def smart_parse_text(
                                    creator=current_user.display_name)
 
     matcher = FleetMatcher(dev_list)
-    errors = []
+    errors = list(parser.errors)
     matched_count = 0
 
     for rec in parsed_records:
+        validation_errors = rec.get("validation_errors") or []
+        for validation_error in validation_errors:
+            errors.append({
+                "line_number": rec.get("line_number"),
+                "line": rec.get("raw_text", ""),
+                "error": validation_error,
+                "severity": "error",
+            })
+        if rec.get("strict"):
+            if rec.get("equipment_id"):
+                matched_device = next((d for d in dev_list if d["id"] == rec["equipment_id"]), None)
+                if matched_device:
+                    rec["equipment_name"] = matched_device["name"]
+                    rec["match_status"] = "matched"
+                    if not validation_errors:
+                        matched_count += 1
+                else:
+                    rec["equipment_id"] = ""
+                    rec["match_status"] = "unmatched"
+            else:
+                rec["match_status"] = "unmatched"
+            rec["is_valid"] = bool(rec.get("equipment_id")) and not validation_errors
+            continue
+
         if rec.get('equipment_id'):
             matched_device = next((d for d in dev_list if d['id'] == rec['equipment_id']), None)
             if matched_device:
@@ -1082,7 +1501,9 @@ def smart_parse_text(
         "summary": {
             "total_hours": round(sum(r.get('duration', 0) for r in parsed_records), 2),
             "total_fuel": round(sum(r.get('fuel', 0) for r in parsed_records), 2),
-            "device_count": len(set(r.get('equipment_id', '') for r in parsed_records if r.get('equipment_id')))
+            "device_count": len(set(r.get('equipment_id', '') for r in parsed_records if r.get('equipment_id'))),
+            "valid_count": len([r for r in parsed_records if r.get("is_valid", bool(r.get("equipment_id")))]),
+            "invalid_count": len([r for r in parsed_records if not r.get("is_valid", bool(r.get("equipment_id")))]),
         }
     }
 
@@ -1171,38 +1592,55 @@ def get_quick_summary(
     today = date.today()
     
     # 设备统计
-    equip_query = db.query(Equipment)
-    if current_user.role != "super":
-        equip_query = equip_query.filter(
-            (Equipment.mine_id == None) | (Equipment.mine_id == current_user.mine_id)
-        )
-    all_equips = equip_query.all()
+    all_equips = _sort_equipments(filter_equipment_visibility(db.query(Equipment), Equipment, current_user).all())
+    visible_equipment_ids = [eq.id for eq in all_equips]
     active_equips = [e for e in all_equips if e.status == "active"]
     broken_equips = [e for e in all_equips if e.status != "active"]
     
     # 当日工时油耗
-    today_stats = db.query(
+    today_stats_query = db.query(
         func.sum(EquipmentWorkLog.work_hours).label("hours"),
         func.sum(EquipmentWorkLog.fuel_liters).label("fuel"),
         func.count(func.distinct(EquipmentWorkLog.equipment_id)).label("equip_count")
-    ).filter(EquipmentWorkLog.work_date == today).first()
+    ).filter(EquipmentWorkLog.work_date == today)
+    today_stats_query = filter_by_mine(today_stats_query, EquipmentWorkLog, "mine_id", current_user)
+    if visible_equipment_ids:
+        today_stats_query = today_stats_query.filter(EquipmentWorkLog.equipment_id.in_(visible_equipment_ids))
+    today_stats = today_stats_query.first()
     
     # 待处理维护
-    pending_maintenance = db.query(EquipmentMaintenance, Equipment).join(
+    pending_maintenance_query = db.query(EquipmentMaintenance, Equipment).join(
         Equipment, EquipmentMaintenance.equipment_id == Equipment.id
     ).filter(
         EquipmentMaintenance.status.in_(["pending", "in_progress"])
-    ).order_by(EquipmentMaintenance.next_date.asc().nullslast()).limit(5).all()
+    )
+    pending_maintenance_query = filter_by_mine(
+        pending_maintenance_query,
+        EquipmentMaintenance,
+        "mine_id",
+        current_user
+    )
+    if visible_equipment_ids:
+        pending_maintenance_query = pending_maintenance_query.filter(
+            EquipmentMaintenance.equipment_id.in_(visible_equipment_ids)
+        )
+    pending_maintenance = pending_maintenance_query.order_by(
+        EquipmentMaintenance.next_date.asc().nullslast()
+    ).limit(5).all()
     
     # 本月汇总
     month_start = date(today.year, today.month, 1)
-    month_stats = db.query(
+    month_stats_query = db.query(
         func.sum(EquipmentWorkLog.work_hours).label("hours"),
         func.sum(EquipmentWorkLog.fuel_liters).label("fuel")
     ).filter(
         EquipmentWorkLog.work_date >= month_start,
         EquipmentWorkLog.work_date <= today
-    ).first()
+    )
+    month_stats_query = filter_by_mine(month_stats_query, EquipmentWorkLog, "mine_id", current_user)
+    if visible_equipment_ids:
+        month_stats_query = month_stats_query.filter(EquipmentWorkLog.equipment_id.in_(visible_equipment_ids))
+    month_stats = month_stats_query.first()
     
     return {
         "equipment": {

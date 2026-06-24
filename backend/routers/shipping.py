@@ -4,14 +4,17 @@ from sqlalchemy import func, extract
 from typing import List
 from datetime import date
 from database import get_db
-from models import ShippingRecord, AuthorizedPlate, Factory, Plate
+from models import ShippingRecord, AuthorizedPlate, Factory, FleetOrganization, Mine, Plate
 from schemas.shipping import ShippingCreate, ShippingUpdate, ShippingOut
 from schemas.factory import FactoryCreate, FactoryUpdate, FactoryOut
 from schemas.plate import PlateCreate, PlateUpdate, PlateOut
 from auth import get_current_active_user
 from utils.permissions import check_mine_access, filter_by_mine, get_target_mine_id
+from utils.fleet_scope import resolve_single_fleet_id
 from utils.crud_helpers import get_object_or_404
 from utils.excel_utils import create_template, create_export, parse_import_file
+from services.plate_comparison import build_plate_comparison
+from services.data_governance import archive_record, assert_period_unlocked
 
 router = APIRouter()
 
@@ -24,8 +27,79 @@ PLATE_FIELDS = ["plate_number", "vehicle_type", "brand", "color", "remark"]
 def _get_and_check(db, model, obj_id, current_user):
     """通用权限检查"""
     obj = get_object_or_404(db, model, obj_id)
-    check_mine_access(current_user, obj.mine_id)
+    _check_scope(current_user, obj)
     return obj
+
+
+def _first_mine_id(db: Session) -> str | None:
+    first_mine = db.query(Mine).order_by(Mine.created_at).first()
+    return first_mine.id if first_mine else None
+
+
+def _get_fleet(db: Session, fleet_id: str | None) -> FleetOrganization | None:
+    if not fleet_id:
+        return None
+    fleet = db.query(FleetOrganization).filter(FleetOrganization.id == fleet_id, FleetOrganization.active == 1).first()
+    if not fleet:
+        raise HTTPException(status_code=400, detail="Fleet organization does not exist or is disabled")
+    return fleet
+
+
+def _scope_for_request(db: Session, current_user, mine_id: str | None = None, fleet_id: str | None = None) -> dict:
+    fleet_id = resolve_single_fleet_id(db, fleet_id)
+    if current_user.role == "fleet":
+        if not current_user.fleet_id:
+            raise HTTPException(status_code=403, detail="Fleet account is not bound to a fleet")
+        fleet = _get_fleet(db, current_user.fleet_id)
+        target_mine = fleet.mine_id or _first_mine_id(db)
+        if not target_mine:
+            raise HTTPException(status_code=400, detail="No backing mine exists for fleet data")
+        return {"mine_id": target_mine, "fleet_id": fleet.id}
+    if fleet_id:
+        if current_user.role != "super":
+            raise HTTPException(status_code=403, detail="Only super admin can select fleet scope")
+        fleet = _get_fleet(db, fleet_id)
+        target_mine = fleet.mine_id or _first_mine_id(db)
+        if not target_mine:
+            raise HTTPException(status_code=400, detail="No backing mine exists for fleet data")
+        return {"mine_id": target_mine, "fleet_id": fleet.id}
+    target_mine = get_target_mine_id(current_user, mine_id)
+    if target_mine is None:
+        raise HTTPException(status_code=400, detail="mine_id is required")
+    check_mine_access(current_user, target_mine)
+    return {"mine_id": target_mine, "fleet_id": None}
+
+
+def _filter_scope(query, model, current_user, mine_id: str | None = None, fleet_id: str | None = None):
+    fleet_id = resolve_single_fleet_id(query.session, fleet_id)
+    if current_user.role == "fleet":
+        return query.filter(getattr(model, "fleet_id") == current_user.fleet_id)
+    if fleet_id:
+        if current_user.role != "super":
+            raise HTTPException(status_code=403, detail="Only super admin can select fleet scope")
+        return query.filter(getattr(model, "fleet_id") == fleet_id)
+    query = filter_by_mine(query, model, "mine_id", current_user, mine_id)
+    return query.filter(getattr(model, "fleet_id") == None)
+
+
+def _check_scope(current_user, obj):
+    fleet_id = getattr(obj, "fleet_id", None)
+    if current_user.role == "fleet":
+        if fleet_id != current_user.fleet_id:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return
+    if fleet_id and current_user.role != "super":
+        raise HTTPException(status_code=403, detail="Permission denied")
+    if not fleet_id:
+        check_mine_access(current_user, obj.mine_id)
+
+
+def _get_factory_for_scope(db: Session, factory_id: str, mine_id: str, fleet_id: str | None, current_user):
+    factory = get_object_or_404(db, Factory, factory_id)
+    _check_scope(current_user, factory)
+    if factory.mine_id != mine_id or factory.fleet_id != fleet_id:
+        raise HTTPException(status_code=400, detail="factory_id does not belong to target scope")
+    return factory
 
 
 # ===================== 运输记录 (Shipping) =====================
@@ -35,13 +109,14 @@ def read_shippings(
     skip: int = 0,
     limit: int = 100,
     mine_id: str = None,
+    fleet_id: str = None,
     factory_id: str = None,
     start_date: str = None,
     end_date: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    query = filter_by_mine(db.query(ShippingRecord), ShippingRecord, "mine_id", current_user, mine_id)
+    query = _filter_scope(db.query(ShippingRecord), ShippingRecord, current_user, mine_id, fleet_id)
     if factory_id:
         query = query.filter(ShippingRecord.factory_id == factory_id)
     if start_date:
@@ -57,13 +132,15 @@ def create_shipping(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    target_mine = get_target_mine_id(current_user, shipping.mine_id)
-    if target_mine is None:
-        raise HTTPException(status_code=400, detail="mine_id is required")
-    check_mine_access(current_user, target_mine)
+    scope = _scope_for_request(db, current_user, shipping.mine_id, shipping.fleet_id)
+    target_mine = scope["mine_id"]
+    target_fleet = scope["fleet_id"]
+    assert_period_unlocked(db, target_mine, "shipping", shipping.load_time)
+    _get_factory_for_scope(db, shipping.factory_id, target_mine, target_fleet, current_user)
 
     db_shipping = ShippingRecord(
         mine_id=target_mine,
+        fleet_id=target_fleet,
         plate_number=shipping.plate_number,
         load_time=shipping.load_time,
         factory_id=shipping.factory_id,
@@ -83,10 +160,11 @@ def read_factories(
     skip: int = 0,
     limit: int = 100,
     mine_id: str = None,
+    fleet_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    query = filter_by_mine(db.query(Factory), Factory, "mine_id", current_user, mine_id)
+    query = _filter_scope(db.query(Factory), Factory, current_user, mine_id, fleet_id)
     return query.offset(skip).limit(limit).all()
 
 
@@ -96,12 +174,11 @@ def create_factory(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    target_mine = get_target_mine_id(current_user, factory.mine_id)
-    if target_mine is None:
-        raise HTTPException(status_code=400, detail="mine_id is required")
-    check_mine_access(current_user, target_mine)
+    scope = _scope_for_request(db, current_user, factory.mine_id, factory.fleet_id)
+    target_mine = scope["mine_id"]
+    target_fleet = scope["fleet_id"]
 
-    db_factory = Factory(mine_id=target_mine, name=factory.name)
+    db_factory = Factory(mine_id=target_mine, fleet_id=target_fleet, name=factory.name)
     db.add(db_factory)
     db.commit()
     db.refresh(db_factory)
@@ -153,11 +230,12 @@ def read_plates(
     skip: int = 0,
     limit: int = 100,
     mine_id: str = None,
+    fleet_id: str = None,
     search: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    query = filter_by_mine(db.query(Plate), Plate, "mine_id", current_user, mine_id)
+    query = _filter_scope(db.query(Plate), Plate, current_user, mine_id, fleet_id)
     if search:
         query = query.filter(
             Plate.plate_number.contains(search)
@@ -173,13 +251,13 @@ def create_plate(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    target_mine = get_target_mine_id(current_user, plate.mine_id)
-    if target_mine is None:
-        raise HTTPException(status_code=400, detail="mine_id is required")
-    check_mine_access(current_user, target_mine)
+    scope = _scope_for_request(db, current_user, plate.mine_id, plate.fleet_id)
+    target_mine = scope["mine_id"]
+    target_fleet = scope["fleet_id"]
 
     db_plate = Plate(
         mine_id=target_mine,
+        fleet_id=target_fleet,
         plate_number=plate.plate_number,
         vehicle_type=plate.vehicle_type,
         brand=plate.brand,
@@ -240,13 +318,14 @@ def download_plate_template(current_user=Depends(get_current_active_user)):
 @router.post("/plates/import/excel")
 async def import_plate_excel(
     mine_id: str = None,
+    fleet_id: str = None,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    target_mine = get_target_mine_id(current_user, mine_id)
-    if target_mine is None:
-        raise HTTPException(status_code=400, detail="mine_id is required")
+    scope = _scope_for_request(db, current_user, mine_id, fleet_id)
+    target_mine = scope["mine_id"]
+    target_fleet = scope["fleet_id"]
 
     ws = await parse_import_file(file, PLATE_HEADERS)
     imported = 0
@@ -265,6 +344,7 @@ async def import_plate_excel(
 
         existing = db.query(Plate).filter(
             Plate.mine_id == target_mine,
+            Plate.fleet_id == target_fleet,
             Plate.plate_number == str(plate_number)
         ).first()
         if existing:
@@ -272,7 +352,7 @@ async def import_plate_excel(
             continue
 
         db.add(Plate(
-            mine_id=target_mine, plate_number=str(plate_number),
+            mine_id=target_mine, fleet_id=target_fleet, plate_number=str(plate_number),
             vehicle_type=str(vehicle_type), brand=str(brand),
             color=str(color), remark=str(remark)
         ))
@@ -285,10 +365,11 @@ async def import_plate_excel(
 @router.get("/plates/export/excel")
 def export_plate_excel(
     mine_id: str = None,
+    fleet_id: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
-    query = filter_by_mine(db.query(Plate), Plate, "mine_id", current_user, mine_id)
+    query = _filter_scope(db.query(Plate), Plate, current_user, mine_id, fleet_id)
     plates = query.all()
     rows = [[p.plate_number, p.vehicle_type, p.brand, p.color, p.remark] for p in plates]
     return create_export(PLATE_HEADERS, rows, "车牌列表.xlsx", [20, 18, 18, 15, 20])
@@ -299,47 +380,50 @@ def export_plate_excel(
 @router.get("/reports/plate-comparison")
 def get_plate_comparison(
     mine_id: str = None,
+    fleet_id: str = None,
     start_date: str = None,
     end_date: str = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user)
 ):
     """车牌比对：找出运输记录中出现但不在授权车牌列表中的车牌"""
-    plate_query = filter_by_mine(db.query(Plate), Plate, "mine_id", current_user, mine_id)
-    authorized_plates = set(p.plate_number for p in plate_query.all())
+    plate_query = _filter_scope(db.query(Plate), Plate, current_user, mine_id, fleet_id)
+    authorized_plates = [p.plate_number for p in plate_query.all()]
 
-    shipping_query = filter_by_mine(
-        db.query(ShippingRecord.plate_number, func.count(ShippingRecord.id).label("count")),
-        ShippingRecord, "mine_id", current_user, mine_id
+    shipping_query = db.query(
+        ShippingRecord.plate_number,
+        ShippingRecord.load_time,
+        ShippingRecord.factory_id,
+        ShippingRecord.cargo_type,
+        Factory.name.label("factory_name")
+    ).join(
+        Factory,
+        ShippingRecord.factory_id == Factory.id
     )
+    shipping_query = _filter_scope(shipping_query, ShippingRecord, current_user, mine_id, fleet_id)
     if start_date:
         shipping_query = shipping_query.filter(ShippingRecord.load_time >= start_date)
     if end_date:
         shipping_query = shipping_query.filter(ShippingRecord.load_time <= end_date)
 
-    shipping_plates = shipping_query.group_by(ShippingRecord.plate_number).all()
+    shipping_rows = [
+        {
+            "plate_number": row.plate_number,
+            "load_time": row.load_time,
+            "factory_id": row.factory_id,
+            "factory_name": row.factory_name,
+            "cargo_type": row.cargo_type
+        }
+        for row in shipping_query.order_by(ShippingRecord.load_time.desc()).all()
+    ]
 
-    authorized_list = []
-    unauthorized_list = []
-
-    for sp in shipping_plates:
-        plate_info = {"plate_number": sp.plate_number, "count": sp.count}
-        if sp.plate_number in authorized_plates:
-            authorized_list.append(plate_info)
-        else:
-            unauthorized_list.append(plate_info)
-
-    return {
-        "authorized": authorized_list,
-        "unauthorized": unauthorized_list,
-        "total_authorized_plates": len(authorized_plates),
-        "total_shipping_plates": len(shipping_plates)
-    }
+    return build_plate_comparison(authorized_plates, shipping_rows)
 
 
 @router.get("/reports/plate-ranking")
 def get_plate_ranking(
     mine_id: str = None,
+    fleet_id: str = None,
     year: int = None,
     month: int = None,
     db: Session = Depends(get_db),
@@ -357,7 +441,7 @@ def get_plate_ranking(
         extract('year', ShippingRecord.load_time) == year,
         extract('month', ShippingRecord.load_time) == month
     )
-    query = filter_by_mine(query, ShippingRecord, "mine_id", current_user, mine_id)
+    query = _filter_scope(query, ShippingRecord, current_user, mine_id, fleet_id)
 
     results = query.group_by(ShippingRecord.plate_number).order_by(
         func.count(ShippingRecord.id).desc()
@@ -376,6 +460,7 @@ def get_plate_ranking(
 @router.get("/reports/factory-stats")
 def get_factory_shipping_stats(
     mine_id: str = None,
+    fleet_id: str = None,
     year: int = None,
     month: int = None,
     db: Session = Depends(get_db),
@@ -394,7 +479,7 @@ def get_factory_shipping_stats(
         extract('year', ShippingRecord.load_time) == year,
         extract('month', ShippingRecord.load_time) == month
     )
-    query = filter_by_mine(query, ShippingRecord, "mine_id", current_user, mine_id)
+    query = _filter_scope(query, ShippingRecord, current_user, mine_id, fleet_id)
 
     results = query.group_by(ShippingRecord.factory_id, Factory.name).order_by(
         func.count(ShippingRecord.id).desc()
@@ -429,6 +514,11 @@ def update_shipping(
     current_user=Depends(get_current_active_user)
 ):
     db_shipping = _get_and_check(db, ShippingRecord, shipping_id, current_user)
+    assert_period_unlocked(db, db_shipping.mine_id, "shipping", db_shipping.load_time)
+    if shipping_update.load_time is not None:
+        assert_period_unlocked(db, db_shipping.mine_id, "shipping", shipping_update.load_time)
+    if shipping_update.factory_id is not None:
+        _get_factory_for_scope(db, shipping_update.factory_id, db_shipping.mine_id, db_shipping.fleet_id, current_user)
     for field in SHIPPING_FIELDS:
         val = getattr(shipping_update, field, None)
         if val is not None:
@@ -445,6 +535,8 @@ def delete_shipping(
     current_user=Depends(get_current_active_user)
 ):
     db_shipping = _get_and_check(db, ShippingRecord, shipping_id, current_user)
+    assert_period_unlocked(db, db_shipping.mine_id, "shipping", db_shipping.load_time)
+    archive_record(db, db_shipping, "shipping", current_user)
     db.delete(db_shipping)
     db.commit()
     return {"message": "运输记录已删除"}

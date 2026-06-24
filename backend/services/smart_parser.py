@@ -8,6 +8,7 @@ import re
 from datetime import datetime, date
 from collections import defaultdict
 from .fleet_matcher import FleetMatcher
+from utils.worklog_time import parse_time_ranges
 
 
 class SmartParser:
@@ -16,6 +17,7 @@ class SmartParser:
     def __init__(self, dev_list):
         self.dev_list = dev_list
         self.devices = dev_list
+        self.errors = []
         self.matcher = FleetMatcher(dev_list)  # 复用统一匹配器
         self._build_lookup_tables()
 
@@ -99,32 +101,66 @@ class SmartParser:
         lines = text.strip().split('\n')
         results = []
         current_date = date.today().strftime("%Y-%m-%d")
+        current_shift = ""
         current_category = ""
-        start_idx = 0
-
-        if lines and self._looks_like_date_line(lines[0]):
-            current_date = self._extract_date(lines[0])
-            start_idx = 1
+        current_header_errors = []
+        has_date_header = any(self._looks_like_date_line(line) for line in lines)
+        has_time_blocks = any(re.search(r'【[^】]*】', line) for line in lines)
+        strict_document = has_date_header and has_time_blocks
+        seen_date_header = False
 
         context = {'last_brand': None, 'last_category': None}
 
-        for line in lines[start_idx:]:
+        for line_number, line in enumerate(lines, start=1):
             line = line.strip()
             if not line:
                 continue
-            if line.startswith('【') and '】' in line:
+            if self._looks_like_date_line(line):
+                seen_date_header = True
+                current_header_errors = []
+                try:
+                    current_date = self._extract_date(line)
+                except ValueError as exc:
+                    current_header_errors.append(str(exc))
+                    self.errors.append({"line_number": line_number, "line": line, "error": str(exc), "severity": "error"})
+                current_shift = self._extract_shift(line)
+                if strict_document and not current_shift:
+                    error = "日期行必须注明白班或晚班"
+                    current_header_errors.append(error)
+                    self.errors.append({"line_number": line_number, "line": line, "error": error, "severity": "error"})
+                current_category = ""
+                context = {'last_brand': None, 'last_category': None}
+                continue
+            if self._is_category_header(line):
                 current_category = self._detect_category_from_header(line)
                 context['last_category'] = current_category
                 continue
 
-            record = self._parse_line(line, current_date, current_category, context)
+            record = self._parse_line(
+                line,
+                current_date,
+                current_category,
+                context,
+                strict=strict_document,
+                shift=current_shift,
+                line_number=line_number,
+            )
             if record:
+                record_errors = list(current_header_errors) + list(record.get('validation_errors') or [])
+                if strict_document and not seen_date_header:
+                    record_errors.append("设备行之前缺少日期标题")
+                record['validation_errors'] = list(dict.fromkeys(record_errors))
+                record['is_valid'] = bool(record.get('equipment_id')) and not record['validation_errors']
                 record['mine_id'] = default_mine_id
                 record['created_by'] = creator
                 results.append(record)
-                context['last_brand'] = record.get('brand', '')
+                if record.get('equipment_id'):
+                    context['last_brand'] = record.get('brand', '')
 
         return results
+
+    def _is_category_header(self, line):
+        return bool(re.fullmatch(r'【[^】]+】', line.strip()))
 
     def _looks_like_date_line(self, line):
         """检查该行是否像日期头"""
@@ -149,8 +185,18 @@ class SmartParser:
             m = re.search(pattern, date_line)
             if m:
                 y, mth, d = m.groups()
-                return f"{y}-{int(mth):02d}-{int(d):02d}"
-        return date.today().strftime("%Y-%m-%d")
+                try:
+                    return date(int(y), int(mth), int(d)).isoformat()
+                except ValueError:
+                    raise ValueError(f"日期无效：{y}.{mth}.{d}")
+        raise ValueError("无法识别日期")
+
+    def _extract_shift(self, line):
+        if re.search(r'晚班|夜班|晚上|夜晚|夜间', line):
+            return "晚班"
+        if re.search(r'白班|白天|日班|白昼', line):
+            return "白班"
+        return ""
 
     def _detect_category_from_header(self, header):
         content = header.strip('【】')
@@ -159,7 +205,7 @@ class SmartParser:
                 return cat
         return ""
 
-    def _parse_line(self, line, work_date, default_category, context):
+    def _parse_line(self, line, work_date, default_category, context, strict=False, shift="", line_number=0):
         line = line.strip()
         if not line:
             return None
@@ -169,6 +215,37 @@ class SmartParser:
 
         # 2. 在去油后文本上提取时间和备注信息
         time_detail, memo, clean_line = self._extract_time_and_memo(line_after_fuel)
+
+        validation_errors = []
+        time_segments = []
+        if strict:
+            parsed_time = parse_time_ranges(time_detail, allow_day_rollover=shift == "晚班")
+            time_detail = parsed_time["canonical"]
+            duration = parsed_time["hours"]
+            time_segments = parsed_time["segments"]
+            validation_errors.extend(parsed_time["errors"])
+            device, strict_error = self._match_device_strict(clean_line, default_category)
+            if strict_error:
+                validation_errors.append(strict_error)
+            return {
+                'date': work_date,
+                'equipment_id': device.get('id', '') if device else '',
+                'equipment_name': device.get('name', '') if device else clean_line,
+                'duration': duration,
+                'time_detail': time_detail,
+                'time_segments': time_segments,
+                'fuel': fuel,
+                'memo': memo,
+                'shift': shift,
+                'raw_text': line,
+                'line_number': line_number,
+                'confidence': 100 if device else 0,
+                'method': '严格唯一匹配' if device else '未匹配',
+                'brand': device.get('brand', '') if device else '',
+                'category': device.get('category', '') if device else default_category,
+                'strict': True,
+                'validation_errors': validation_errors,
+            }
 
         # 计算工作时长 - 仅从时间块提取（memo可能包含加油等数字信息，不能回退）
         duration = self._calc_duration(time_detail)
@@ -194,6 +271,10 @@ class SmartParser:
                 'method': '智能匹配',
                 'brand': brand,
                 'category': category,
+                'shift': shift,
+                'line_number': line_number,
+                'strict': False,
+                'validation_errors': validation_errors,
             }
 
         # 兜底：尝试旧格式兼容
@@ -215,8 +296,99 @@ class SmartParser:
                 'method': method,
                 'brand': device.get('brand', ''),
                 'category': device.get('category', ''),
+                'shift': shift,
+                'line_number': line_number,
+                'strict': False,
+                'validation_errors': validation_errors,
             }
         return None
+
+    def _match_device_strict(self, line, default_category):
+        identity = self._normalize_identity(line)
+        exact_candidates = []
+        for device in self.devices:
+            values = [device.get('code', ''), device.get('name', '')]
+            values.extend(re.split(r'[,，;；]', device.get('aliases', '') or ''))
+            if identity and any(identity == self._normalize_identity(value) for value in values if value):
+                exact_candidates.append(device)
+        exact_candidates = self._unique_devices(exact_candidates)
+        if len(exact_candidates) == 1:
+            return exact_candidates[0], ""
+        if len(exact_candidates) > 1:
+            return None, self._ambiguous_device_error(exact_candidates)
+
+        category = self._detect_category_from_text(line) or default_category
+        brand = self._detect_brand_from_text(line)
+        short_match = re.search(r'([A-Za-z]?\d+)\s*号', line, re.IGNORECASE)
+        short_num = self._normalize_short_num(short_match.group(1)) if short_match else ""
+        remaining = line
+        if short_match:
+            remaining = remaining[:short_match.start()] + remaining[short_match.end():]
+        model_numbers = re.findall(r'\d{2,4}', remaining)
+
+        candidates = list(self.devices)
+        if category:
+            candidates = [device for device in candidates if device.get('category', '') == category]
+        if brand:
+            candidates = [device for device in candidates if device.get('brand', '') == brand]
+        if short_num:
+            candidates = [
+                device for device in candidates
+                if self._normalize_short_num(device.get('short_num', '')) == short_num
+            ]
+        if model_numbers:
+            candidates = [
+                device for device in candidates
+                if all(
+                    re.search(rf'(?<!\d){re.escape(model)}(?!\d)', " ".join([
+                        device.get('code', ''), device.get('name', ''), device.get('type', '')
+                    ]))
+                    for model in model_numbers
+                )
+            ]
+
+        candidates = self._unique_devices(candidates)
+        if len(candidates) == 1:
+            return candidates[0], ""
+        if len(candidates) > 1:
+            return None, self._ambiguous_device_error(candidates)
+        return None, f"设备“{line}”不存在或设备档案信息不完整"
+
+    def _normalize_identity(self, value):
+        text = str(value or "").strip().lower()
+        replacements = {
+            "勾机": "钩机",
+            "挖机": "钩机",
+            "挖掘机": "钩机",
+            "破碎锤": "炮机",
+            "装载机": "铲车",
+        }
+        for source, target in replacements.items():
+            text = text.replace(source, target)
+        return re.sub(r'[\s\-_/，,;；]+', '', text)
+
+    def _normalize_short_num(self, value):
+        text = str(value or "").strip().upper()
+        return str(int(text)) if text.isdigit() else text
+
+    def _detect_brand_from_text(self, line):
+        for brand, keywords in self.brand_keywords.items():
+            if any(keyword.lower() in line.lower() for keyword in keywords):
+                return brand
+        return ""
+
+    def _detect_category_from_text(self, line):
+        for category, keywords in self.category_keywords.items():
+            if any(keyword.lower() in line.lower() for keyword in keywords):
+                return category
+        return ""
+
+    def _unique_devices(self, devices):
+        return list({device.get('id'): device for device in devices if device.get('id')}.values())
+
+    def _ambiguous_device_error(self, devices):
+        names = "、".join(device.get('name', device.get('code', '')) for device in devices[:5])
+        return f"设备匹配不唯一：{names}"
 
     def _get_device_by_id(self, device_id):
         for d in self.devices:
@@ -236,9 +408,9 @@ class SmartParser:
             line = re.sub(r'【[^】]*】', '', line)
 
         # 括号备注：（XX）格式
-        memo_match = re.search(r'[（(]([^)）]+)[)）]', line)
-        if memo_match:
-            memo = memo_match.group(1).strip()
+        memo_matches = re.findall(r'[（(]([^)）]+)[)）]', line)
+        if memo_matches:
+            memo = "；".join(item.strip() for item in memo_matches if item.strip())
             line = re.sub(r'[（(][^)）]+[)）]', '', line)
 
         # 内联时间格式：7:00-12:00 或 07:00-18:00

@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MineOps · 矿山管理系统</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>MineOps · 矿山管理系统 · Agave v3</title>
 
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
@@ -14,7 +17,9 @@
     <!-- XLSX -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <!-- Custom CSS -->
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=admin-tools-20260615">
+    <link rel="stylesheet" href="css/agave.css?v=agave-v3-reload">
+    <link rel="stylesheet" href="css/clear-shift.css?v=dashboard-native-20260613">
 </head>
 <body>
 
@@ -23,28 +28,43 @@
     <div class="login-card">
         <div style="text-align:center;margin-bottom:28px">
             <div style="display:inline-flex;align-items:center;gap:12px;margin-bottom:12px">
-                <div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,var(--acc),#d97706);display:flex;align-items:center;justify-content:center">
-                    <i class="fas fa-mountain" style="color:var(--bg);font-size:22px"></i>
-                </div>
+                <img src="assets/logo.png" alt="MineOps" style="width:52px;height:52px;border-radius:12px;">
                 <h1 style="font-family:var(--font-display);font-size:28px;font-weight:900;letter-spacing:-0.5px">MineOps</h1>
             </div>
             <p style="font-size:13px;color:var(--txt2)">矿山综合管理系统 · 刚果矿区</p>
         </div>
-        <div class="form-group">
-            <label for="login-username">用户名</label>
-            <input type="text" id="login-username" class="form-control" placeholder="请输入用户名" autocomplete="username">
+        <div id="login-form-panel">
+            <div class="form-group">
+                <label for="login-username">用户名</label>
+                <input type="text" id="login-username" class="form-control" placeholder="请输入用户名" autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label for="login-password">密码</label>
+                <div class="password-field-wrap">
+                    <input type="password" id="login-password" class="form-control" placeholder="请输入密码" autocomplete="current-password">
+                    <button type="button" class="password-toggle" onclick="Auth.togglePassword('login-password', this)" aria-label="显示密码"><i class="fas fa-eye"></i></button>
+                </div>
+            </div>
+            <button id="login-submit" class="btn btn-primary btn-block" onclick="Auth.login()">登 录</button>
+            <button type="button" class="forgot-password-link" onclick="Auth.showForgotPassword()">忘记密码？通过邮箱找回</button>
+            <div id="login-error" class="login-error hidden"></div>
         </div>
-        <div class="form-group">
-            <label for="login-password">密码</label>
-            <input type="password" id="login-password" class="form-control" placeholder="请输入密码" autocomplete="current-password">
-        </div>
-        <button id="login-submit" class="btn btn-primary btn-block" onclick="Auth.login()">登 录</button>
-        <div id="login-error" class="login-error hidden"></div>
-        <div class="login-hint" style="margin-top:16px">
-            <p style="color:var(--txt2);margin-bottom:4px;font-weight:500">测试账户：</p>
-            <p>超级管理员：admin / admin</p>
-            <p>矿山A管理员：mine_a / mine123</p>
-            <p>矿山B管理员：mine_b / mine123</p>
+        <div id="forgot-password-panel" class="hidden">
+            <div class="form-group"><label for="reset-email">绑定邮箱</label><input type="email" id="reset-email" class="form-control" placeholder="请输入账户绑定邮箱" autocomplete="email"></div>
+            <div class="reset-code-row">
+                <input type="text" id="reset-code" class="form-control" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
+                <button type="button" id="send-reset-code" class="btn btn-secondary" onclick="Auth.sendResetCode()">发送验证码</button>
+            </div>
+            <div class="form-group">
+                <label for="reset-new-password">新密码</label>
+                <div class="password-field-wrap">
+                    <input type="password" id="reset-new-password" class="form-control" placeholder="至少 6 位">
+                    <button type="button" class="password-toggle" onclick="Auth.togglePassword('reset-new-password', this)" aria-label="显示密码"><i class="fas fa-eye"></i></button>
+                </div>
+            </div>
+            <button type="button" id="confirm-reset-password" class="btn btn-primary btn-block" onclick="Auth.confirmPasswordReset()">重置密码</button>
+            <button type="button" class="forgot-password-link" onclick="Auth.hideForgotPassword()">返回登录</button>
+            <div id="reset-password-message" class="login-error hidden"></div>
         </div>
     </div>
 </div>
@@ -64,7 +84,7 @@
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-logo">
             <div class="logo-icon">
-                <i class="fas fa-mountain"></i>
+                <img src="assets/logo.png" alt="MineOps" style="width:100%;height:100%;object-fit:contain;">
             </div>
             <span class="logo-text">MineOps</span>
         </div>
@@ -92,7 +112,11 @@
                 <span id="mine-badge" class="mine-badge hidden"></span>
             </div>
             <div class="top-header-right">
-                <div class="lang-switcher" id="lang-switcher">
+                <div class="toolbar-group">
+                    <button id="theme-toggle" class="theme-toggle" onclick="UI.toggleTheme()" title="切换深色模式">
+                        <i class="fas fa-moon"></i>
+                        <span>深色</span>
+                    </button>
                     <button class="lang-btn" data-lang="zh-CN" onclick="I18n.switchLang('zh-CN')">中文</button>
                     <button class="lang-btn" data-lang="en-US" onclick="I18n.switchLang('en-US')">EN</button>
                     <button class="lang-btn" data-lang="fr-FR" onclick="I18n.switchLang('fr-FR')">FR</button>
@@ -101,6 +125,9 @@
                     <div class="pulse-dot"></div>
                     <span id="header-username" class="header-user">--</span>
                 </div>
+                <button id="reminder-center-button" class="btn-icon reminder-center-button" onclick="UI.openSettings('reminders')" title="提醒中心">
+                    <i class="fas fa-bell"></i><span id="reminder-center-badge" class="reminder-center-badge hidden">0</span>
+                </button>
                 <button class="btn-icon" onclick="Auth.logout()" title="退出登录">
                     <i class="fas fa-right-from-bracket"></i>
                 </button>
@@ -112,6 +139,10 @@
             <!-- 动态填充 -->
         </main>
     </div>
+
+    <button type="button" id="settings-fab" class="settings-fab" onclick="UI.openSettings()" title="设置中心" aria-label="打开设置中心">
+        <i class="fas fa-gear"></i>
+    </button>
 </div>
 
 <!-- ========== 模态框容器 ========== -->
@@ -121,10 +152,10 @@
 <div id="toast-container"></div>
 
 <!-- ========== JS 文件 ========== -->
-<script src="js/auth.js"></script>
-<script src="js/api.js"></script>
-<script src="js/i18n.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/main.js"></script>
+<script src="js/auth.js?v=admin-tools-20260615"></script>
+<script src="js/api.js?v=admin-tools-20260615"></script>
+<script src="js/i18n.js?v=agave-v3-reload"></script>
+<script src="js/ui.js?v=admin-tools-20260615"></script>
+<script src="js/main.js?v=agave-v3-reload"></script>
 </body>
 </html>

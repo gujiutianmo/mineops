@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, date
 class WorkLogBase(BaseModel):
-    mine_id: str
+    mine_id: Optional[str] = None
     equipment_id: str
     work_date: date
     work_hours: Optional[float] = 0

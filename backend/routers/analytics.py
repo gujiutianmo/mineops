@@ -7,7 +7,7 @@ from typing import Optional
 from database import get_db
 from models import Equipment, EquipmentWorkLog, EquipmentMaintenance, Mine
 from auth import get_current_active_user
-from utils.permissions import filter_by_mine
+from utils.permissions import filter_by_mine, filter_equipment_visibility
 
 router = APIRouter()
 
@@ -44,13 +44,7 @@ def equipment_ranking(
         Equipment.code, Equipment.category, Equipment.brand, Equipment.mine_id
     )
 
-    # 权限过滤
-    if mine_id:
-        query = query.filter(EquipmentWorkLog.mine_id == mine_id)
-    else:
-        user_mine = getattr(current_user, 'mine_id', None)
-        if current_user.role != "super" and user_mine:
-            query = query.filter(EquipmentWorkLog.mine_id == user_mine)
+    query = filter_by_mine(query, EquipmentWorkLog, "mine_id", current_user, mine_id)
 
     results = query.order_by(text("total_hours DESC")).all()
 
@@ -94,13 +88,7 @@ def equipment_trend(
         EquipmentWorkLog.work_date >= cutoff
     )
 
-    # 权限过滤
-    if mine_id:
-        base_query = base_query.filter(EquipmentWorkLog.mine_id == mine_id)
-    else:
-        user_mine = getattr(current_user, 'mine_id', None)
-        if current_user.role != "super" and user_mine:
-            base_query = base_query.filter(EquipmentWorkLog.mine_id == user_mine)
+    base_query = filter_by_mine(base_query, EquipmentWorkLog, "mine_id", current_user, mine_id)
 
     if equipment_id:
         base_query = base_query.filter(EquipmentWorkLog.equipment_id == equipment_id)
@@ -136,17 +124,12 @@ def equipment_summary(
     current_user=Depends(get_current_active_user)
 ):
     """设备总览摘要"""
-    equip_query = db.query(Equipment).filter(Equipment.status == "active")
-
-    # 矿山用户只看自己矿山的设备
-    user_mine = getattr(current_user, 'mine_id', None)
-    if current_user.role != "super":
-        if mine_id:
-            equip_query = equip_query.filter(Equipment.mine_id == mine_id)
-        elif user_mine:
-            equip_query = equip_query.filter(Equipment.mine_id == user_mine)
-    elif mine_id:
-        equip_query = equip_query.filter(Equipment.mine_id == mine_id)
+    equip_query = filter_equipment_visibility(
+        db.query(Equipment).filter(Equipment.status == "active"),
+        Equipment,
+        current_user,
+        mine_id
+    )
 
     total_equipment = equip_query.count()
 
@@ -158,13 +141,7 @@ def equipment_summary(
         Equipment.status == "active"
     )
 
-    if current_user.role != "super":
-        if mine_id:
-            category_stats = category_stats.filter(Equipment.mine_id == mine_id)
-        elif user_mine:
-            category_stats = category_stats.filter(Equipment.mine_id == user_mine)
-    elif mine_id:
-        category_stats = category_stats.filter(Equipment.mine_id == mine_id)
+    category_stats = filter_equipment_visibility(category_stats, Equipment, current_user, mine_id)
 
     category_stats = category_stats.group_by(Equipment.category).all()
 
@@ -176,10 +153,7 @@ def equipment_summary(
         EquipmentWorkLog.work_date == today
     )
 
-    if mine_id:
-        today_hours = today_hours.filter(EquipmentWorkLog.mine_id == mine_id)
-    elif user_mine and current_user.role != "super":
-        today_hours = today_hours.filter(EquipmentWorkLog.mine_id == user_mine)
+    today_hours = filter_by_mine(today_hours, EquipmentWorkLog, "mine_id", current_user, mine_id)
 
     today_total = today_hours.scalar() or 0
 
@@ -229,13 +203,7 @@ def maintenance_reminders(
         Equipment.status == "active"
     )
 
-    # 权限过滤
-    if mine_id:
-        latest = latest.filter(EquipmentMaintenance.mine_id == mine_id)
-    else:
-        user_mine = getattr(current_user, 'mine_id', None)
-        if current_user.role != "super" and user_mine:
-            latest = latest.filter(EquipmentMaintenance.mine_id == user_mine)
+    latest = filter_by_mine(latest, EquipmentMaintenance, "mine_id", current_user, mine_id)
 
     all_records = latest.all()
 
@@ -306,12 +274,7 @@ def maintenance_stats(
         EquipmentMaintenance.maintenance_date >= cutoff
     )
 
-    if mine_id:
-        query = query.filter(EquipmentMaintenance.mine_id == mine_id)
-    else:
-        user_mine = getattr(current_user, 'mine_id', None)
-        if current_user.role != "super" and user_mine:
-            query = query.filter(EquipmentMaintenance.mine_id == user_mine)
+    query = filter_by_mine(query, EquipmentMaintenance, "mine_id", current_user, mine_id)
 
     # 按类型统计
     type_stats = db.query(
@@ -322,10 +285,7 @@ def maintenance_stats(
         EquipmentMaintenance.maintenance_date >= cutoff
     )
 
-    if mine_id:
-        type_stats = type_stats.filter(EquipmentMaintenance.mine_id == mine_id)
-    elif current_user.role != "super" and getattr(current_user, 'mine_id', None):
-        type_stats = type_stats.filter(EquipmentMaintenance.mine_id == current_user.mine_id)
+    type_stats = filter_by_mine(type_stats, EquipmentMaintenance, "mine_id", current_user, mine_id)
 
     type_stats = type_stats.group_by(EquipmentMaintenance.maintenance_type).all()
 

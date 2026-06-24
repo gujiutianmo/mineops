@@ -3,7 +3,8 @@ from typing import Optional
 from datetime import datetime
 
 class PlateBase(BaseModel):
-    mine_id: str
+    mine_id: Optional[str] = None
+    fleet_id: Optional[str] = None
     plate_number: str
     vehicle_type: Optional[str] = ""
     brand: Optional[str] = ""
@@ -20,6 +21,7 @@ class PlateUpdate(BaseModel):
     color: Optional[str] = None
     remark: Optional[str] = None
     mine_id: Optional[str] = None
+    fleet_id: Optional[str] = None
 
 class PlateOut(PlateBase):
     id: str

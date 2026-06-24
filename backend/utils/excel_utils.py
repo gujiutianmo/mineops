@@ -14,6 +14,13 @@ HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_ALIGNMENT = Alignment(horizontal="center")
 
 
+def _ascii_download_name(filename: str, fallback: str) -> str:
+    ascii_filename = re.sub(r'[^\x00-\x7F]+', '', filename).strip()
+    if not ascii_filename or ascii_filename.lower() == ".xlsx" or ascii_filename.startswith('_'):
+        return fallback
+    return ascii_filename
+
+
 def create_template(headers: List[str], filename: str, column_widths: List[int] = None):
     """生成导入模板"""
     wb = openpyxl.Workbook()
@@ -44,9 +51,7 @@ def create_template(headers: List[str], filename: str, column_widths: List[int] 
 
     encoded_filename = quote(filename)
     # RFC 6266: provide fallback ASCII filename for legacy clients
-    ascii_filename = re.sub(r'[^\x00-\x7F]+', '', filename)
-    if not ascii_filename or ascii_filename.startswith('_'):
-        ascii_filename = 'download.xlsx'
+    ascii_filename = _ascii_download_name(filename, 'download.xlsx')
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -84,9 +89,7 @@ def create_export(headers: List[str], rows: List[List], filename: str, column_wi
     stream.seek(0)
 
     encoded_filename = quote(filename)
-    ascii_filename = re.sub(r'[^\x00-\x7F]+', '', filename)
-    if not ascii_filename or ascii_filename.startswith('_'):
-        ascii_filename = 'export.xlsx'
+    ascii_filename = _ascii_download_name(filename, 'export.xlsx')
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

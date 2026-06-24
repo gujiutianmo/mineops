@@ -38,6 +38,35 @@ def filter_by_mine(query, model, mine_field: str, current_user: MineAccount, min
     return query
 
 
+def filter_equipment_visibility(query, equipment_model, current_user: MineAccount, mine_id: str = None, include_global: bool = True):
+    """过滤设备可见范围。
+
+    - super: 可看全部；传 mine_id 时看该矿山，可按 include_global 包含全局设备。
+    - mine: 只能看自己的矿山；按 include_global 决定是否包含 mine_id=NULL 的共享设备。
+    """
+    col = equipment_model.mine_id
+    if current_user.role != "super":
+        if include_global:
+            return query.filter((col == current_user.mine_id) | (col == None))
+        return query.filter(col == current_user.mine_id)
+
+    if mine_id:
+        if include_global:
+            return query.filter((col == mine_id) | (col == None))
+        return query.filter(col == mine_id)
+    return query
+
+
+def get_effective_mine_id(current_user: MineAccount, mine_id: str = None):
+    """返回当前请求实际允许使用的 mine_id。
+
+    普通矿山用户不能通过 query/body 覆盖自己的矿山；super 保留传入值。
+    """
+    if current_user.role != "super":
+        return current_user.mine_id
+    return mine_id
+
+
 def get_target_mine_id(current_user: MineAccount, mine_id: str = None):
     """获取有效的目标矿山ID，用于创建操作。
     普通用户自动使用自己的 mine_id；super admin 使用传入的 mine_id 或 None（全局操作）。

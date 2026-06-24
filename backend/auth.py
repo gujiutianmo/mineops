@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from models import MineAccount
@@ -47,7 +47,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     if user is None:
         raise credentials_exception
     return user
-async def get_current_active_user(current_user: MineAccount = Depends(get_current_user)):
+async def get_current_active_user(request: Request, current_user: MineAccount = Depends(get_current_user)):
     if current_user.active != 1:
         raise HTTPException(status_code=400, detail="Inactive user")
+    if int(current_user.must_change_password or 0) and request.url.path not in {
+        "/auth/me", "/auth/me/account", "/auth/change-password"
+    }:
+        raise HTTPException(status_code=403, detail="首次登录必须先修改密码")
     return current_user

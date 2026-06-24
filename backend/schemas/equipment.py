@@ -90,6 +90,8 @@ class WorkLogCreate(BaseModel):
     remark: Optional[str] = ""
     time_detail: Optional[str] = ""
     raw_text: Optional[str] = ""
+    shift: Optional[str] = ""
+    strict_time: bool = False
 
 class WorkLogUpdate(BaseModel):
     work_hours: Optional[float] = None

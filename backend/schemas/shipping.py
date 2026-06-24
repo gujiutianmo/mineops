@@ -2,7 +2,8 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 class ShippingBase(BaseModel):
-    mine_id: str
+    mine_id: Optional[str] = None
+    fleet_id: Optional[str] = None
     plate_number: str
     load_time: datetime
     factory_id: str

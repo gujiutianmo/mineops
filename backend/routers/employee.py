@@ -13,6 +13,8 @@ router = APIRouter()
 
 EMPLOYEE_HEADERS = ["法文姓名", "中文姓名", "人员类型(中方/刚方)", "职位", "薪资", "货币(USD/CDF)"]
 EMPLOYEE_FIELDS = ["name_fr", "name_cn", "staff_type", "job", "salary", "currency"]
+VALID_CURRENCIES = {"USD", "CDF"}
+VALID_STAFF_TYPES = {"中方", "刚方", ""}
 
 
 def _get_and_check(db, model, obj_id, current_user):
@@ -86,6 +88,8 @@ def update_employee(
     for field in EMPLOYEE_FIELDS:
         val = getattr(employee_update, field, None)
         if val is not None:
+            if hasattr(val, "value"):
+                val = val.value
             setattr(db_employee, field, val)
     db.commit()
     db.refresh(db_employee)
@@ -137,15 +141,28 @@ async def import_employee_excel(
         if not name_fr:
             errors.append(f"第{row}行: 法文姓名为空")
             continue
+        currency = str(currency).strip().upper()
+        staff_type = str(staff_type).strip()
+        if currency not in VALID_CURRENCIES:
+            errors.append(f"第{row}行: 货币必须为 USD 或 CDF, 当前值: {currency}")
+            continue
+        if staff_type not in VALID_STAFF_TYPES:
+            errors.append(f"第{row}行: 人员类型必须为 中方 或 刚方, 当前值: {staff_type}")
+            continue
+        try:
+            salary_value = float(salary)
+        except (TypeError, ValueError):
+            errors.append(f"第{row}行: 薪资必须为数字, 当前值: {salary}")
+            continue
 
         db.add(Employee(
             mine_id=target_mine,
             name_fr=str(name_fr),
             name_cn=str(name_cn),
-            staff_type=str(staff_type),
+            staff_type=staff_type,
             job=str(job),
-            salary=float(salary),
-            currency=str(currency)
+            salary=salary_value,
+            currency=currency
         ))
         imported += 1
 

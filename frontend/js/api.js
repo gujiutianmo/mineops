@@ -3,7 +3,11 @@
  * Centralized API client with CRUD factory pattern
  */
 const API_CONFIG = {
-    baseUrl: 'http://localhost:8008'
+    baseUrl: window.MINEOPS_API_BASE || (
+        window.location.port && window.location.port !== '80'
+            ? `${window.location.protocol}//${window.location.hostname}:8008`
+            : `${window.location.origin}/api`
+    )
 };
 
 const API = {
@@ -129,8 +133,11 @@ function createCrudApi(resourcePath) {
 
 function createImportExportApi(resourcePath) {
     return {
-        importExcel: (formData) => API.uploadFile(`/${resourcePath}/import/excel`, formData),
-        exportExcel: () => API.downloadFile(`/${resourcePath}/export/excel`),
+        importExcel: (formData, params = {}) => {
+            const qs = new URLSearchParams(params).toString();
+            return API.uploadFile(`/${resourcePath}/import/excel${qs ? `?${qs}` : ''}`, formData);
+        },
+        exportExcel: (params = {}) => API.downloadFile(`/${resourcePath}/export/excel`, params),
         downloadTemplate: () => API.downloadFile(`/${resourcePath}/import/template`)
     };
 }
@@ -140,10 +147,119 @@ API.mines = createCrudApi('mines');
 API.equipment = createCrudApi('equipment');
 API.employees = createCrudApi('employees');
 API.finance = createCrudApi('finance');
+API.finance.analysis = (params) => API.get('/finance/analysis', params);
+API.finance.summaryByCurrency = (params) => API.get('/finance/summary/by-currency', params);
+API.finance.expenseByCategory = (params) => API.get('/finance/summary/expense-by-category', params);
 API.plates = createCrudApi('plates');
 API.factories = createCrudApi('factories');
 API.shipping = createCrudApi('shipping');
 API.worklogs = createCrudApi('worklogs');
+API.fleet = {
+    vehicles: {
+        getAll: (params) => API.get('/fleet/vehicles', params),
+        getById: (id) => API.get(`/fleet/vehicles/${id}`),
+        create: (data) => API.post('/fleet/vehicles', data),
+        update: (id, data) => API.put(`/fleet/vehicles/${id}`, data),
+        delete: (id) => API.delete(`/fleet/vehicles/${id}`)
+    },
+    maintenance: {
+        getAll: (params) => API.get('/fleet/maintenance', params),
+        getById: (id) => API.get(`/fleet/maintenance/${id}`),
+        create: (data) => API.post('/fleet/maintenance', data),
+        update: (id, data) => API.put(`/fleet/maintenance/${id}`, data),
+        delete: (id) => API.delete(`/fleet/maintenance/${id}`)
+    },
+    fuelTrips: {
+        getAll: (params) => API.get('/fleet/fuel-trips', params),
+        getById: (id) => API.get(`/fleet/fuel-trips/${id}`),
+        create: (data) => API.post('/fleet/fuel-trips', data),
+        update: (id, data) => API.put(`/fleet/fuel-trips/${id}`, data),
+        delete: (id) => API.delete(`/fleet/fuel-trips/${id}`),
+        sync: (params) => API.post(`/fleet/fuel-trips/sync?${new URLSearchParams(params).toString()}`, {})
+    },
+    dashboard: (params) => API.get('/fleet/dashboard', params),
+    plateComparison: (params) => API.get('/fleet/plate-comparison', params),
+    analyzeText: (data) => API.post('/fleet/analyze-text', data),
+    savePlateRecord: (data) => API.post('/fleet/plate-records', data),
+    importWorkbook: (formData, params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return API.uploadFile(`/fleet/import/workbook${qs ? `?${qs}` : ''}`, formData);
+    },
+    downloadTemplate: () => API.downloadFile('/fleet/import/template'),
+    exportWorkbook: (params) => API.downloadFile('/fleet/export/workbook', params)
+};
+API.users = {
+    getAll: (params) => API.get('/auth/users', params),
+    getById: (id) => API.get(`/auth/users/${id}`),
+    create: (data) => API.post('/auth/users', data),
+    update: (id, data) => API.put(`/auth/users/${id}`, data),
+    delete: (id) => API.delete(`/auth/users/${id}`)
+};
+API.emailSettings = {
+    get: () => API.get('/auth/email-settings'),
+    update: (data) => API.put('/auth/email-settings', data),
+    test: (data) => API.post('/auth/email-settings/test', data)
+};
+API.accountSettings = {
+    updateProfile: (data) => API.put('/auth/me/account', data),
+    changePassword: (data) => API.post('/auth/change-password', data)
+};
+API.adminTools = {
+    getSecurity: () => API.get('/admin-tools/security'),
+    updateSecurity: (data) => API.put('/admin-tools/security', data),
+    reminders: (params) => API.get('/admin-tools/reminders', params),
+    locks: (params) => API.get('/admin-tools/locks', params),
+    createLock: (data) => API.post('/admin-tools/locks', data),
+    deleteLock: (id) => API.delete(`/admin-tools/locks/${id}`),
+    recycleBin: () => API.get('/admin-tools/recycle-bin'),
+    restore: (id) => API.post(`/admin-tools/recycle-bin/${id}/restore`, {}),
+    reportOverview: (params) => API.get('/admin-tools/reports/overview', params)
+};
+API.audit = {
+    list: (params) => API.get('/audit/', params),
+    stats: () => API.get('/audit/stats')
+};
+API.equipmentHours = {
+    list: (params) => API.get('/equipment-hours/records', params),
+    getById: (id) => API.get(`/equipment-hours/records/${id}`),
+    update: (id, data) => API.put(`/equipment-hours/records/${id}`, data),
+    delete: (id) => API.delete(`/equipment-hours/records/${id}`),
+    active: () => API.get('/equipment-hours/active'),
+    start: (data) => API.post('/equipment-hours/start', data),
+    batchStart: (data) => API.post('/equipment-hours/batch-start', data),
+    end: (id, data = {}) => API.post(`/equipment-hours/${id}/end`, data),
+    manual: (data) => API.post('/equipment-hours/manual', data),
+    myStats: (params) => API.get('/equipment-hours/my-stats', params),
+    dashboard: (params) => API.get('/equipment-hours/dashboard', params),
+    daily: (params) => API.get('/equipment-hours/daily', params),
+    operatorRanking: (params) => API.get('/equipment-hours/operator-ranking', params),
+    batchDelete: (ids) => API.post('/equipment-hours/batch-delete', { record_ids: ids }),
+    batchEnd: (ids) => API.post('/equipment-hours/batch-end', { record_ids: ids }),
+    exportExcel: (params) => API.downloadFile('/equipment-hours/export/excel', params)
+};
+API.employeeAttendance = {
+    records: (params) => API.get('/employee-attendance/records', params),
+    active: (params) => API.get('/employee-attendance/active', params),
+    today: (params) => API.get('/employee-attendance/today', params),
+    stats: (params) => API.get('/employee-attendance/stats', params),
+    checkOut: (id, data = {}) => API.post(`/employee-attendance/${id}/check-out`, data)
+};
+API.plateCounter = {
+    getTargets: (params) => API.get('/plate-counter/targets', params),
+    saveTargets: (data) => API.put('/plate-counter/targets', data),
+    analyze: (data) => API.post('/plate-counter/analyze', data),
+    analyzeFile: (formData) => API.uploadFile('/plate-counter/analyze-file', formData),
+    saveRecord: (data) => API.post('/plate-counter/records', data),
+    listRecords: (params) => API.get('/plate-counter/records', params),
+    getRecord: (date, params) => API.get(`/plate-counter/records/${date}`, params),
+    deleteRecord: (date, params) => API.delete(`/plate-counter/records/${date}${params ? '?' + new URLSearchParams(params).toString() : ''}`),
+    monthly: (params) => API.get('/plate-counter/monthly', params),
+    exportMonthly: (params) => API.downloadFile('/plate-counter/monthly/export', params)
+};
+
+API.opsIntelligence = {
+    overview: (params) => API.get('/ops-intelligence/overview', params)
+};
 
 API.equipmentImport = {
     ...createImportExportApi('equipment'),
@@ -193,13 +309,17 @@ API.dashboard = {
             API.employees.getAll({ limit: 1000 }),
             API.finance.getAll({ limit: 1000 })
         ]);
-        let total = 0;
-        fin.forEach(r => total += r.trans_type === 'income' ? r.amount : -r.amount);
+        const financeByCurrency = {};
+        fin.forEach(r => {
+            const currency = r.currency || 'UNKNOWN';
+            if (!financeByCurrency[currency]) financeByCurrency[currency] = 0;
+            financeByCurrency[currency] += r.trans_type === 'income' ? Number(r.amount || 0) : -Number(r.amount || 0);
+        });
         return {
             mineCount: mines.length,
             equipmentCount: equip.length,
             employeeCount: emp.length,
-            financeTotal: total
+            financeByCurrency
         };
     },
 
@@ -257,7 +377,10 @@ API.dashboard = {
 const API_MAP = {
     mines: API.mines, equipment: API.equipment, employees: API.employees,
     finance: API.finance, shipping: API.shipping, worklogs: API.worklogs,
-    plates: API.plates, factories: API.factories
+    plates: API.plates, factories: API.factories, users: API.users,
+    'fleet-vehicles': API.fleet.vehicles,
+    'fleet-maintenance': API.fleet.maintenance,
+    'fleet-fuel-trips': API.fleet.fuelTrips
 };
 
 const IMPORT_EXPORT_MAP = {

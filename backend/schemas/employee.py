@@ -11,7 +11,7 @@ class StaffTypeEnum(str, Enum):
     congolese = "刚方"
 
 class EmployeeBase(BaseModel):
-    mine_id: str
+    mine_id: Optional[str] = None
     name_fr: str
     name_cn: Optional[str] = ""
     staff_type: Optional[StaffTypeEnum] = None

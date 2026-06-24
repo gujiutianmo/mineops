@@ -10,6 +10,7 @@ from auth import get_current_active_user
 from utils.permissions import check_mine_access, filter_by_mine, get_target_mine_id
 from utils.crud_helpers import get_object_or_404
 from utils.excel_utils import create_export
+from services.data_governance import archive_record, assert_period_unlocked
 
 router = APIRouter()
 
@@ -20,6 +21,15 @@ def _get_and_check(db, model, obj_id, current_user):
     obj = get_object_or_404(db, model, obj_id)
     check_mine_access(current_user, obj.mine_id)
     return obj
+
+
+def _ensure_equipment_can_log(db: Session, equipment_id: str, target_mine: str, current_user):
+    equipment = get_object_or_404(db, Equipment, equipment_id)
+    if current_user.role != "super" and equipment.mine_id is not None and equipment.mine_id != current_user.mine_id:
+        raise HTTPException(status_code=403, detail="Permission denied: 不能使用其他矿山的设备")
+    if equipment.mine_id is not None and equipment.mine_id != target_mine:
+        raise HTTPException(status_code=400, detail="equipment_id does not belong to target mine")
+    return equipment
 
 
 # ========== Static routes (MUST be before /{worklog_id}) ==========
@@ -165,6 +175,8 @@ def create_worklog(
     if target_mine is None:
         raise HTTPException(status_code=400, detail="mine_id is required")
     check_mine_access(current_user, target_mine)
+    assert_period_unlocked(db, target_mine, "worklogs", worklog.work_date)
+    _ensure_equipment_can_log(db, worklog.equipment_id, target_mine, current_user)
 
     db_worklog = EquipmentWorkLog(
         mine_id=target_mine,
@@ -199,6 +211,9 @@ def update_worklog(
 ):
     """更新工作日志"""
     db_worklog = _get_and_check(db, EquipmentWorkLog, worklog_id, current_user)
+    assert_period_unlocked(db, db_worklog.mine_id, "worklogs", db_worklog.work_date)
+    if worklog_update.work_date is not None:
+        assert_period_unlocked(db, db_worklog.mine_id, "worklogs", worklog_update.work_date)
     for field in WORKLOG_FIELDS:
         val = getattr(worklog_update, field, None)
         if val is not None:
@@ -216,6 +231,8 @@ def delete_worklog(
 ):
     """删除工作日志"""
     db_worklog = _get_and_check(db, EquipmentWorkLog, worklog_id, current_user)
+    assert_period_unlocked(db, db_worklog.mine_id, "worklogs", db_worklog.work_date)
+    archive_record(db, db_worklog, "worklogs", current_user)
     db.delete(db_worklog)
     db.commit()
     return {"message": "工作日志已删除"}

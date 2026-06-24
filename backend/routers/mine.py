@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from database import get_db
-from models import Mine, MineAccount, Equipment, EquipmentWorkLog, Employee, FinanceRecord, AuthorizedPlate, Plate, Factory, ShippingRecord
+from models import Mine, MineAccount, Equipment, EquipmentWorkLog, Employee, EmployeeAttendance, FinanceRecord, AuthorizedPlate, Plate, Factory, ShippingRecord
 from schemas.mine import MineCreate, MineUpdate, MineOut
 from auth import get_current_active_user, get_password_hash
 from utils.permissions import require_super_admin
@@ -14,7 +14,7 @@ MINE_FIELDS = ["name"]
 
 # Related models that reference Mine via mine_id FK (for cascade delete)
 MINE_RELATED_MODELS = [
-    MineAccount, EquipmentWorkLog, FinanceRecord, Employee,
+    MineAccount, EquipmentWorkLog, EmployeeAttendance, FinanceRecord, Employee,
     AuthorizedPlate, Plate, ShippingRecord, Factory, Equipment
 ]
 

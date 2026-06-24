@@ -9,7 +9,8 @@ class CurrencyEnum(str, Enum):
     USD = "USD"
     CDF = "CDF"
 class FinanceBase(BaseModel):
-    mine_id: str
+    mine_id: Optional[str] = None
+    fleet_id: Optional[str] = None
     trans_type: TransTypeEnum
     amount: float
     currency: CurrencyEnum

@@ -44,11 +44,16 @@ const Auth = {
                 // 用服务器数据刷新本地
                 this.currentUser = {
                     ...this.currentUser,
+                    id: data.id,
                     username: data.username,
                     role: data.role,
                     mine_id: data.mine_id,
-                    display_name: data.display_name
+                    mine_name: data.mine_name,
+                    display_name: data.display_name,
+                    email: data.email || '',
+                    must_change_password: !!data.must_change_password
                 };
+                localStorage.setItem('mineops_user', JSON.stringify(this.currentUser));
                 this.updateAllUserInfo();
                 return true;
             }
@@ -66,6 +71,7 @@ const Auth = {
         const displayName = this.currentUser.display_name || this.currentUser.username;
         const username = this.currentUser.username;
         const role = this.currentUser.role;
+        const roleLabel = role === 'super' ? '超级管理员' : role === 'mine' ? '矿山子管理员' : '矿山子用户';
         const mineLabel = this.currentUser.mine_name || `矿山 #${this.currentUser.mine_id || '--'}`;
 
         // 侧边栏底部
@@ -76,7 +82,7 @@ const Auth = {
 
         // 顶部栏
         const headerUser = document.getElementById('header-username');
-        if (headerUser) headerUser.textContent = role === 'super' ? `${displayName} · 超级管理员` : displayName;
+        if (headerUser) headerUser.textContent = `${displayName} · ${roleLabel}`;
 
         // 矿山徽章
         const mineBadge = document.getElementById('mine-badge');
@@ -116,6 +122,84 @@ const Auth = {
         if (userInput) userInput.value = '';
         if (passInput) passInput.value = '';
         if (errEl) errEl.classList.add('hidden');
+        this.hideForgotPassword();
+    },
+
+    togglePassword: function(inputId, button) {
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        const icon = button?.querySelector('i');
+        if (icon) icon.className = showing ? 'fas fa-eye' : 'fas fa-eye-slash';
+        button?.setAttribute('aria-label', showing ? '显示密码' : '隐藏密码');
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+    },
+
+    showForgotPassword: function() {
+        document.getElementById('login-form-panel')?.classList.add('hidden');
+        document.getElementById('forgot-password-panel')?.classList.remove('hidden');
+        document.getElementById('login-hint')?.classList.add('hidden');
+        const username = document.getElementById('login-username')?.value || '';
+        if (username.includes('@')) document.getElementById('reset-email').value = username;
+    },
+
+    hideForgotPassword: function() {
+        document.getElementById('forgot-password-panel')?.classList.add('hidden');
+        document.getElementById('login-form-panel')?.classList.remove('hidden');
+        document.getElementById('login-hint')?.classList.remove('hidden');
+        const message = document.getElementById('reset-password-message');
+        if (message) { message.textContent = ''; message.classList.add('hidden'); }
+    },
+
+    setResetMessage: function(message, success = false) {
+        const el = document.getElementById('reset-password-message');
+        if (!el) return;
+        el.textContent = message;
+        el.classList.remove('hidden', 'success');
+        if (success) el.classList.add('success');
+    },
+
+    sendResetCode: async function() {
+        const email = document.getElementById('reset-email')?.value?.trim();
+        const button = document.getElementById('send-reset-code');
+        if (!email) { this.setResetMessage('请输入绑定邮箱'); return; }
+        if (button) { button.disabled = true; button.textContent = '发送中...'; }
+        try {
+            const response = await fetch(`${API_CONFIG.baseUrl}/auth/password-reset/request`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || '验证码发送失败');
+            this.setResetMessage(data.message || '验证码已发送', true);
+        } catch (error) {
+            this.setResetMessage(error.message || '验证码发送失败');
+        } finally {
+            if (button) { button.disabled = false; button.textContent = '发送验证码'; }
+        }
+    },
+
+    confirmPasswordReset: async function() {
+        const email = document.getElementById('reset-email')?.value?.trim();
+        const code = document.getElementById('reset-code')?.value?.trim();
+        const new_password = document.getElementById('reset-new-password')?.value || '';
+        const button = document.getElementById('confirm-reset-password');
+        if (!email || !code || new_password.length < 6) { this.setResetMessage('请填写邮箱、6 位验证码和至少 6 位新密码'); return; }
+        if (button) { button.disabled = true; button.textContent = '重置中...'; }
+        try {
+            const response = await fetch(`${API_CONFIG.baseUrl}/auth/password-reset/confirm`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code, new_password })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || '密码重置失败');
+            this.setResetMessage(data.message || '密码已重置', true);
+            setTimeout(() => this.hideForgotPassword(), 900);
+        } catch (error) {
+            this.setResetMessage(error.message || '密码重置失败');
+        } finally {
+            if (button) { button.disabled = false; button.textContent = '重置密码'; }
+        }
     },
 
     showAppShell: function() {
@@ -156,12 +240,15 @@ const Auth = {
             const data = await resp.json();
 
             this.currentUser = {
+                id: data.id,
                 username: data.username,
                 role: data.role,
                 mine_id: data.mine_id,
                 mine_name: data.mine_name,
                 token: data.access_token,
-                display_name: data.display_name
+                display_name: data.display_name,
+                email: data.email || '',
+                must_change_password: !!data.must_change_password
             };
             localStorage.setItem('mineops_user', JSON.stringify(this.currentUser));
             localStorage.setItem('mineops_token', data.access_token);
@@ -185,6 +272,26 @@ const Auth = {
         localStorage.removeItem('mineops_token');
         this.currentUser = null;
         this.showLoginOverlay();
+    },
+
+    updateSession: function(data) {
+        if (!this.currentUser || !data) return;
+        const token = data.access_token || this.currentUser.token || localStorage.getItem('mineops_token') || '';
+        this.currentUser = {
+            ...this.currentUser,
+            id: data.id ?? this.currentUser.id,
+            username: data.username ?? this.currentUser.username,
+            display_name: data.display_name ?? this.currentUser.display_name,
+            email: Object.prototype.hasOwnProperty.call(data, 'email') ? (data.email || '') : (this.currentUser.email || ''),
+            role: data.role ?? this.currentUser.role,
+            mine_id: data.mine_id ?? this.currentUser.mine_id,
+            mine_name: data.mine_name ?? this.currentUser.mine_name,
+            must_change_password: Object.prototype.hasOwnProperty.call(data, 'must_change_password') ? !!data.must_change_password : !!this.currentUser.must_change_password,
+            token
+        };
+        localStorage.setItem('mineops_user', JSON.stringify(this.currentUser));
+        localStorage.setItem('mineops_token', token);
+        this.updateAllUserInfo();
     },
 
     /* ─── Helpers ─── */
